@@ -729,8 +729,8 @@ describe('页面级「检查更新 / 一键更新」（版本文本三态 + 通�
     expect(countOf(calls, 'update.check'), '切换通道后没有立即重新检查').toBe(2)
     const channelButton = findButtonByLabel(betaTree, '更新通道')
     expect(channelButton, '切换后通道锚点丢失').toBeDefined()
-    expect(channelButton!.props.className, '通道按钮必须使用自适应宽度样式')
-      .toContain('dim-ah-channelBtn')
+    expect(channelButton!.props.className, '通道锚点必须使用下拉胶囊样式')
+      .toContain('dim-ah-selectAnchor')
     expect(lastCheckChannel(calls), '重新检查没有带 beta 通道').toBe('beta')
     // beta 有更新：版本文本显示「有更新 v0.2.0+3333333」（tag+短 sha 形态直显）。
     expect(textsOf(versionTextOf(betaTree)!).join(''), 'beta 有更新应显示 tag+短 sha 版本号')

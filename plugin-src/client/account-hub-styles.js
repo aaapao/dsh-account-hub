@@ -3,11 +3,15 @@
  *
  * ## 两条硬约束（本次迁移的目标）
  *
- * 1. **交互控件一律来自 `@deepseek-ai/dsh-client-ui-primitives`**，本文件不再为
- *    任何控件提供外观 —— 按钮 / 开关 / 单选 / 下拉 / 弹窗 / 悬停提示 / 徽标 /
- *    状态点的样式都在那个包里，且其类名是构建期 hash 过的（拿不到、也不该拿）。
- *    本文件里剩下的每一条规则都只服务**布局**（DSH 没有对应原语的那些结构：
- *    侧栏、卡片、拖拽插入线、等分双列、网格）。
+ * 1. **交互控件一律来自 `@deepseek-ai/dsh-client-ui-primitives`** —— 按钮 / 开关 /
+ *    单选 / 弹窗 / 悬停提示 / 徽标 / 状态点的样式都在那个包里，且其类名是构建期
+ *    hash 过的（拿不到、也不该拿）。本文件里剩下的规则只服务**布局**（DSH 没有
+ *    对应原语的那些结构：侧栏、卡片、拖拽插入线、等分双列、网格）。
+ *
+ *    **唯一例外是下拉锚点胶囊**（`.dim-ah-selectAnchor`）：ui-primitives 没有
+ *    Select / DropdownMenu 导出，宿主的设置页同样是「`Menu` 原语 + 自建胶囊按钮」
+ *    （`LanguageRow` / `PreferenceRow` 的 `.selector`）。那一枚胶囊的几何与配色
+ *    在本文件里逐字沿用 —— 不这么写就没有「宿主同款的下拉」可言。
  * 2. **颜色 / 字体一律走 DSH design token**，不再有十六进制字面量。token 名单
  *    取自宿主 `packages/client/ui-theme/src/styles/design-platform.css`（亮色
  *    `body` 与暗色 `body[data-ds-dark-theme]` 两套定义）与 `base.css`。
@@ -182,8 +186,23 @@ const STYLES = `
    标题行里图标按钮与文字按钮同排，若两者高度不同就会一行两种基线。宽度取同值
    以保持正方形。按钮本体仍由 ui-primitives 提供。 */
 .dim-ah-iconBtn { box-sizing: border-box; flex: none; width: 28px; min-width: 28px; height: 28px; padding: 0; display: inline-flex; align-items: center; justify-content: center; }
-/* 通道下拉保留图标按钮高度，但按「正式/Beta」文案自适应宽度。 */
-.dim-ah-channelBtn { box-sizing: border-box; flex: none; width: auto; min-width: max-content; height: 28px; padding: 0 10px; display: inline-flex; align-items: center; justify-content: center; }
+/* ── 下拉锚点胶囊（本文件唯一一处控件外观） ──
+   全插件三处下拉共用这一枚锚点：头部的「更新通道」，面板顶部的「消耗顺序 /
+   切换粒度」，候选行里的「供应商 / 模型 / 思考程度」。ui-primitives 没有
+   Select / DropdownMenu 导出，宿主的设置页同样是「Menu 原语 + 自建胶囊按钮」——
+   以下几何与配色**逐字**沿用宿主 LanguageRow.module.css 的 .selector
+   （PreferenceRow.module.css 里那份逐字相同，是同一枚控件的第二次出现）。
+   宽度不写死：头部那枚按「正式 / Beta」文案自适应，另两处由各自的栅格列拉伸
+   （见 .dim-ah-consumptionGroup 与 .dim-ah-arEntryRow 的后代规则）。 */
+.dim-ah-selectAnchor { display: inline-flex; align-items: center; gap: 12px; height: 36px; padding: 0 14px; border: none; border-radius: 18px; background: var(--dsw-alias-bg-module-platform); font: inherit; font-size: 14px; line-height: 22px; color: var(--dsw-alias-label-primary); cursor: pointer; }
+/* hover 与禁用两态：宿主 .selector 的两处用例都可点，故它两条都没有。
+   这里补上，取值照同包 Button.module.css —— .button:disabled 的
+   （cursor: not-allowed + opacity: 0.4）与 .ghost/.outline 的 :not(:disabled)
+   守卫，保证与同页其它按钮的禁用观感一致，且禁用时不会误亮。 */
+.dim-ah-selectAnchor:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover); }
+.dim-ah-selectAnchor:disabled { cursor: not-allowed; opacity: 0.4; }
+/* chevron 不参与压缩：窄列下该省略的是文案，图标不能跟着变形。 */
+.dim-ah-selectAnchorChevron { flex: none; }
 /* 未签到与登录入口采用白底黑字的 outline 外观。 */
 .dim-ah-iconBtn-light { background: white; color: black; }
 .dim-ah-iconGlyph { display: inline-flex; align-items: center; justify-content: center; line-height: 1; }
@@ -243,16 +262,27 @@ const STYLES = `
    max-height 取 min(640px, calc(100vh - 48px))：小视口按视口留 24px 边距，
    大视口封顶 640px，超出的部分由 .dim-ah-modalBody 自己滚。 */
 .dim-ah-modal { width: min(560px, 100%); max-height: min(640px, calc(100vh - 48px)); }
-.dim-ah-modalHead { flex: none; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.dim-ah-modalTitle { min-width: 0; display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px; font-size: var(--dsw-font-s-14-font-size); line-height: var(--dsw-font-s-14-line-height); font-weight: var(--dsw-font-s-strong-14-font-weight); color: var(--dsw-alias-label-primary); }
-.dim-ah-modalSubtitle { overflow: hidden; font-size: var(--dsw-font-xxs-12-font-size); line-height: var(--dsw-font-xxs-12-line-height); font-weight: var(--dsw-font-xxs-12-font-weight); color: var(--dsw-alias-label-tertiary); text-overflow: ellipsis; white-space: nowrap; }
-/* 头部右侧刷新按钮组 */
+/* ⚠️ 标题行与正文都由本插件**自绘**（见 ModelListPanel 的 headless 分支），
+   因为宿主 Modal 的 title 只收字符串、也没有标题栏插槽。代价是宿主那两层
+   内边距随 headless 一起消失，必须在这里补齐，否则标题与列表会紧贴卡片圆角：
+   - 头部对齐宿主 .header 的 22px 14px 12px 24px；
+   - 正文对齐宿主 .body 的左右 24px（上下由 .dialog 的 20px gap 承担）。 */
+.dim-ah-modalHead { flex: none; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 22px 14px 12px 24px; }
+/* 标题 + 当前 Provider 名同排：标题不缩，Provider 名过长时自己省略。 */
+.dim-ah-modalTitleRow { flex: 1 1 auto; min-width: 0; display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 8px; }
+/* 字号行高逐字对齐宿主 .title（16px / 24px / 500）。 */
+.dim-ah-modalTitle { flex: none; margin: 0; font-size: var(--dsw-font-base-strong-16-font-size); line-height: var(--dsw-font-base-strong-16-line-height); font-weight: var(--dsw-font-base-strong-16-font-weight); color: var(--dsw-alias-label-primary); }
+/* Provider 名是「当前在给哪个 provider 配模型」的唯一线索，必须一眼可见：
+   14px 二级灰（此前是 12px 三级灰，实机上淡到看不出有字，被当成没渲染）。 */
+.dim-ah-modalSubtitle { min-width: 0; overflow: hidden; font-size: var(--dsw-font-s-14-font-size); line-height: var(--dsw-font-s-14-line-height); font-weight: var(--dsw-font-s-14-font-weight); color: var(--dsw-alias-label-secondary); text-overflow: ellipsis; white-space: nowrap; }
+/* 头部右侧刷新 / 关闭按钮组 */
 .dim-ah-modelPanelActions { flex: none; display: flex; align-items: center; gap: 8px; }
-.dim-ah-modalHint { flex: none; margin: 10px 0 0; font-size: var(--dsw-font-xxs-12-font-size); line-height: var(--dsw-font-xxs-12-line-height); color: var(--dsw-alias-label-tertiary); }
+.dim-ah-modalHint { flex: none; margin: 0; font-size: var(--dsw-font-xxs-12-font-size); line-height: var(--dsw-font-xxs-12-line-height); color: var(--dsw-alias-label-tertiary); }
 .dim-ah-modal .dim-ah-probeNotice { flex: none; margin: 10px 0 0; }
-/* 列表区独立滚动：头部与说明固定，模型多时只滚中间。
-   这条 class 同时作为 Modal 的 contentClassName 传下去（见 ModelListPanel）。 */
-.dim-ah-modalBody { flex: 1 1 auto; min-height: 0; margin-top: 10px; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
+/* 列表区独立滚动：头部固定，模型多时只滚中间。
+   这条 class 是 ModelListPanel 自绘正文容器的类名（headless 下不再走 Modal 的
+   contentClassName）—— 正文的左右内边距与滚动都靠它。 */
+.dim-ah-modalBody { flex: 1 1 auto; min-height: 0; padding: 0 24px; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
 .dim-ah-modalBody .dim-ah-empty { padding: 24px; }
 
 /* 每行一个模型：左侧名称 + id，右侧开关（多档 provider 再多一列窗口档位） */
@@ -274,11 +304,25 @@ const STYLES = `
 .dim-ah-modelTier { flex: none; display: flex; align-items: center; justify-content: flex-end; gap: 6px; flex-wrap: wrap; }
 .dim-ah-tierOption { font-size: var(--dsw-font-xxs-12-font-size); line-height: var(--dsw-font-xxs-12-line-height); white-space: nowrap; }
 
-/* 消耗顺序 / 切换粒度：两个原生下拉各占容器一半，保留宿主控件的边框与状态外观。
-   分组用 flex: 1 1 0 平分（basis 取 0 才是严格等宽）；min-width: 0 让窄面板下继续压缩。 */
+/* 消耗顺序 / 切换粒度：两个下拉**各占容器一半**，两者宽度之和恒等于这一排的宽度。
+   分组用 flex: 1 1 0 平分（basis 取 0 才是严格等宽：若留 auto，较长的那份文案
+   会把两份拉成不同宽度）；min-width: 0 让窄面板下继续压缩而不是撑破右栏。 */
 .dim-ah-consumption { display: flex; gap: 8px; margin-bottom: 12px; }
+/* 分组本身是 grid 容器：唯一的子节点（Menu 的 .root 是 inline-flex）会被拉伸到
+   整列宽，故锚点宽度 = 分组宽度，不需要给 .root 再加类名。 */
 .dim-ah-consumptionGroup { flex: 1 1 0; min-width: 0; display: grid; }
-.dim-ah-select { box-sizing: border-box; width: 100%; min-width: 0; appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='M2.5 4.5 6 8l3.5-3.5' fill='none' stroke='%23666' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"); background-position: right 12px center; background-repeat: no-repeat; background-size: 12px 12px; padding-right: 32px; }
+/* 锚点填满分组；文字与 chevron 分列两端。宽度由分组决定，不跟随选中项文案变化。
+   ⚠️ 这条是 .dim-ah-selectAnchor 的**后代**规则，必须排在那条基础规则之后：
+   spec 用 styles.indexOf('.dim-ah-selectAnchor {') 定位基础规则，而后代写法里
+   含有同一个子串，顺序颠倒会让它切到错误的那一段。 */
+.dim-ah-consumptionGroup .dim-ah-selectAnchor { box-sizing: border-box; width: 100%; min-width: 0; justify-content: space-between; white-space: nowrap; }
+/* 展开的选项列表与锚点同宽（「弹层宽度 = 按钮宽度」）：Menu 的列表是 .root 内的
+   绝对定位子节点，而 .root 已被拉到分组宽度，故 100% 即按钮宽度。
+   面板没有用 portal（portal 会把列表挂到 body 上、失去这个包含块），
+   这一条必须在场，否则列表退回宿主 .list 的 min-width: 144px 内容宽。
+   宿主 .list 的 min-width 同为单类选择器，靠注入顺序（运行期 append 到 head
+   末尾）在同特异性下胜出 —— 与 .dim-ah-modal 覆盖宿主 dialog 宽度同一机制。 */
+.dim-ah-consumptionMenu { width: 100%; min-width: 0; }
 
 /* 悬停提示的宿主锚点：包住非 forwardRef 的组件，使 Tooltip 能拿到真实 DOM 节点。
    inline-flex 不改变父级 flex/grid 的参与关系，也不给行内元素引入额外行高。 */
@@ -313,26 +357,57 @@ const STYLES = `
 .dim-ah-arCard[data-dropBefore="true"]::before { content: ''; position: absolute; left: 0; right: 0; top: -6px; height: 3px; border-radius: 2px; background: var(--dsw-alias-brand-primary); }
 .dim-ah-arCard[data-dropAfter="true"]::after { content: ''; position: absolute; left: 0; right: 0; bottom: -6px; height: 3px; border-radius: 2px; background: var(--dsw-alias-brand-primary); }
 
-/* 卡片头：拖拽柄 + 序号 + 名称输入 + 条目数 + 删除；输入框优先压缩。 */
-.dim-ah-arCardHead { display: grid; grid-template-columns: 16px max-content minmax(0, 1fr) max-content max-content; align-items: center; gap: 8px; }
-.dim-ah-arCardHead[data-drag-enabled="false"] { grid-template-columns: max-content minmax(0, 1fr) max-content max-content; }
+/* 卡片头：拖拽柄 + 序号 + 名称输入 + 删除；输入框优先压缩。
+   列数必须与 DOM 子节点一一对应（6cb46c9 删「条目数」徽标时收缩过一次），
+   尾部多出的空轨道不报错，只在行右缘留下约一个 gap 的死空白。 */
+.dim-ah-arCardHead { display: grid; grid-template-columns: 16px max-content minmax(0, 1fr) max-content; align-items: center; gap: 8px; }
+.dim-ah-arCardHead[data-drag-enabled="false"] { grid-template-columns: max-content minmax(0, 1fr) max-content; }
 /* 序号徽标：与账号卡片的 .dim-ah-accountOrder 同义（顺序即降级顺序），
    但这里显示的是**定义**序号，故另起一个类名而不是复用。 */
 .dim-ah-arOrder { min-width: 18px; padding: 0 5px; border-radius: 6px; font-size: var(--dsw-font-xxxs-11-font-size); line-height: var(--dsw-font-xxxs-11-line-height); font-weight: var(--dsw-font-xxxs-strong-11-font-weight); text-align: center; color: var(--dsw-alias-label-secondary); background: var(--dsw-alias-bg-module-platform); }
-/* 名称输入优先占用剩余空间；条目数与删除按钮维持自身宽度。 */
-.dim-ah-arNameInput { width: 100%; min-width: 0; }
+/* 名称输入优先占用剩余空间；删除按钮维持自身宽度。
+   ⚠️ box-sizing 不是装饰，是本行**防重叠的必要条件**，删掉即回归真机缺陷：
+   这个类名落在 ui-primitives 那个 Input 的**外层 wrapper span** 上
+   （className 由 Input 透传给 wrapper，不是给内层 input），而那个 wrapper
+   自带 8px 左右内边距 + 0.5px 描边；宿主全站又**没有**通盘 box-sizing 重置。
+   故默认 content-box 下 width: 100% 只算内容宽，wrapper 实宽 = 栅格列宽
+   + 17px，越过 8px 的栅格 gap 向右压到相邻的删除按钮上 —— 真机报障
+   「自动模型名编辑框右边和删除按钮重叠」正是这一条。 */
+.dim-ah-arNameInput { box-sizing: border-box; width: 100%; min-width: 0; }
 
 /* 候选列表（卡片内），间距按 12/8/4 节奏收敛。 */
 .dim-ah-arEntries { display: grid; gap: 8px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--dsw-alias-border-l2); }
-/* 一条候选：拖拽柄 + 三个等宽下拉 + 按删除钮内容自适应的末列。 */
-.dim-ah-arEntryRow { position: relative; display: grid; grid-template-columns: 16px repeat(3, minmax(0, 1fr)) max-content; align-items: center; gap: 8px; padding: 4px; border-radius: 8px; transition: background var(--ds-transition-duration-fast) var(--ds-ease-in-out), opacity var(--ds-transition-duration-fast) var(--ds-ease-in-out); }
-.dim-ah-arEntryRow[data-drag-enabled="false"] { grid-template-columns: repeat(3, minmax(0, 1fr)) max-content; }
+/* 一条候选：拖拽柄 + 一行可点击文本 + 按删除钮内容自适应的末列。
+   三个下拉已搬进候选编辑弹窗（见 .dim-ah-arEditor），行上只剩「这条候选长什么样」
+   与两个行级动作（拖拽、删除），故文本列吃满剩余宽度。 */
+.dim-ah-arEntryRow { position: relative; display: grid; grid-template-columns: 16px minmax(0, 1fr) max-content; align-items: center; gap: 8px; padding: 4px; border-radius: 8px; transition: background var(--ds-transition-duration-fast) var(--ds-ease-in-out), opacity var(--ds-transition-duration-fast) var(--ds-ease-in-out); }
+.dim-ah-arEntryRow[data-drag-enabled="false"] { grid-template-columns: minmax(0, 1fr) max-content; }
 .dim-ah-arEntryRow:hover { background: var(--dsw-alias-bg-layer-2); }
 .dim-ah-arEntryRow[data-dragging="true"] { opacity: 0.4; border-style: dashed; }
 .dim-ah-arEntryRow[data-dropBefore="true"]::before { content: ''; position: absolute; left: 0; right: 0; top: -4px; height: 2px; border-radius: 2px; background: var(--dsw-alias-brand-primary); }
 .dim-ah-arEntryRow[data-dropAfter="true"]::after { content: ''; position: absolute; left: 0; right: 0; bottom: -4px; height: 2px; border-radius: 2px; background: var(--dsw-alias-brand-primary); }
-/* 每格填满固定 grid 列，选项文字变化不会改变列宽。 */
-.dim-ah-arEntryMenu { box-sizing: border-box; width: 100%; min-width: 0; max-width: 100%; justify-content: space-between; overflow: hidden; white-space: nowrap; }
+/* 行上的候选描述：一枚无边框文本按钮，点开候选编辑弹窗（三个下拉在里面）。
+   外观全部清掉（无边框 / 无背景 / 继承字号），只留 hover 的交互底色 ——
+   取值照同包 Button.module.css 的 ghost 外观，与 .dim-ah-selectAnchor 的 hover
+   是同一条 token。overflow + ellipsis 是必须的：模型名动辄几十字符，栅格列宽
+   由 minmax(0, 1fr) 定死，不裁就会画到删除按钮上。 */
+.dim-ah-arEntryText { box-sizing: border-box; min-width: 0; max-width: 100%; padding: 4px 8px; border: none; border-radius: 6px; background: transparent; font: inherit; color: var(--dsw-alias-label-primary); text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+.dim-ah-arEntryText:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover); }
+.dim-ah-arEntryText:disabled { cursor: not-allowed; opacity: 0.4; }
+/* 还没选全时那行字是**引导语**（「选择供应商」/「选择模型」）而不是配置值，
+   退到三级灰，与已配好的「模型(档位)-供应商」区分开。 */
+.dim-ah-arEntryText[data-placeholder="true"] { color: var(--dsw-alias-label-tertiary); }
+
+/* 候选编辑弹窗正文：三行「标签 + 下拉」，标签列按文案自适应、下拉吃满剩余。 */
+.dim-ah-arEditor { display: grid; gap: 12px; }
+.dim-ah-arEditorRow { display: grid; grid-template-columns: max-content minmax(0, 1fr); align-items: center; gap: 12px; }
+.dim-ah-arEditorLabel { font-size: var(--dsw-font-xxs-12-font-size); line-height: var(--dsw-font-xxs-12-line-height); color: var(--dsw-alias-label-secondary); }
+/* 弹窗里的锚点铺满整列，选项文字变化不会改变列宽。
+   overflow: hidden 是必须的：栅格列宽由 minmax(0, 1fr) 定死，而胶囊的文案可以
+   比列还长（模型名动辄几十字符），不裁就会画到相邻列上。
+   ⚠️ 与 .dim-ah-consumptionGroup 那条同因：后代规则必须排在
+   .dim-ah-selectAnchor 基础规则之后（见该处的说明）。 */
+.dim-ah-arEditorRow .dim-ah-selectAnchor { box-sizing: border-box; width: 100%; min-width: 0; max-width: 100%; justify-content: space-between; overflow: hidden; white-space: nowrap; }
 
 /* 「添加模型」入口所在行。 */
 .dim-ah-arAddEntry { display: flex; align-items: center; gap: 8px; }

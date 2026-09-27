@@ -794,26 +794,19 @@ describe('控件与样式迁移（源码级通盘闸门）', () => {
   const clientCode = codeOnly(clientSource)
   const styleCode = codeOnly(styleSource)
 
-  it('原生表单控件有白名单：消耗档位下拉用原生 select，其余仍归零', () => {
-    // 消耗档位下拉（ConsumptionSelect）经用户拍板改为宿主设置页同款的原生 select：
-    // 它是唯一豁免项，其余自绘 select / option / input 仍禁止 —— 白名单之外出现
-    // 即为新的样式体系逃逸。
+  it('原生表单控件全文件归零：五处下拉统一为 Menu + 胶囊锚点', () => {
+    // 消耗档位下拉曾一度按用户要求改成原生 select，是当时唯一的白名单豁免项；
+    // 如今五处下拉（消耗顺序 / 切换粒度 / 供应商 / 模型 / 思考程度 / 更新通道）
+    // 已统一为「Menu 原语 + 胶囊锚点」，白名单随之作废 —— 回到归零闸门：
+    // 全文件（含 ConsumptionSelect 函数体内）都不许再出现原生表单控件。
+    // 留着白名单会掩盖「某个下拉偷偷退回原生 select」这类回退。
     for (const native of [
+      "createElement('select'",
+      "createElement('option'",
       "createElement('input'",
     ]) {
       expect(clientCode, `仍在自绘原生控件：${native}`).not.toContain(native)
     }
-    // select / option 只允许出现在 ConsumptionSelect 函数体内（原生下拉本体），
-    // 文件其余位置出现即违规。
-    const selectStart = clientCode.indexOf('function ConsumptionSelect(')
-    const selectEnd = clientCode.indexOf('\nfunction ', selectStart + 1)
-    expect(selectStart, '找不到 ConsumptionSelect').toBeGreaterThan(-1)
-    const selectBody = clientCode.slice(selectStart, selectEnd)
-    const outside = clientCode.slice(0, selectStart) + clientCode.slice(selectEnd)
-    expect(selectBody, 'ConsumptionSelect 应使用原生 select').toContain("createElement('select'")
-    expect(selectBody, 'ConsumptionSelect 应使用原生 option').toContain("createElement('option'")
-    expect(outside, '白名单之外不得自绘 select').not.toContain("createElement('select'")
-    expect(outside, '白名单之外不得自绘 option').not.toContain("createElement('option'")
     // 原生 confirm 是浏览器自绘的模态，样式不进主题体系 —— 两处都改成了原语。
     expect(clientCode).not.toMatch(/\bconfirm\(/)
     // 反向锚点：替代物必须在位（否则「删了原生控件」也可能只是功能没了）。
@@ -835,33 +828,96 @@ describe('控件与样式迁移（源码级通盘闸门）', () => {
     expect(clientCode).not.toContain('拖动以调整候选顺序（顺序即降级顺序）')
     expect(clientCode).not.toContain('通过浏览器登录一个新的账号并加入账号池。')
     expect(clientCode).not.toContain('重新查询本页全部账号的剩余积分（Credits Balance）。余额由服务端实时计算，点此可刷新。')
-    // 状态点与自动路由开关的简短提示保留；消耗档位迁原生 select 后，各档说明
-    // 挂在 option 的 title 属性上（原生下拉项无自定义渲染，title 是唯一途径）。
+    // 状态点与自动路由开关的简短提示保留；消耗档位回到 Menu 后，各档说明重新
+    // 挂在**菜单项**的 label 上（`withHoverTitle` 包住选项文案，展开列表时逐档
+    // 可悬停查看）—— 这是「说明文案没有随原生 select 一起丢掉」的唯一锚点。
     expect(clientCode).toContain("withHoverTitle(React.createElement(StateDot")
     expect(clientCode).toContain('开启后「自动路由」出现在 DSH 模型列表，其它 provider 从列表隐藏')
-    expect(clientCode).toContain("title: option.hint")
+    expect(clientCode).toContain("withHoverTitle(React.createElement('span', null, option.label), option.hint)")
   })
 
-  it('模型列表弹窗只保留标题行右侧的刷新符号按钮', () => {
+  /**
+   * 标题行自绘（真机反馈的两个缺陷的回归锁）：
+   *
+   * 1. 宿主 `Modal` 的 `title` 只收**字符串**、且没有标题栏插槽，非 headless 时
+   *    `children` 落进宿主 body —— 也就是宿主标题行的**下方**。于是「模型列表」
+   *    由宿主印在第一行，Provider 名与刷新按钮只能另起一行，视觉上分了家。
+   *    现在整条标题行走 headless 自绘：标题文字、Provider 名、右侧按钮组同排。
+   * 2. Provider 名此前是 12px 三级灰，实机上淡到看不出有字，被当成「没渲染」。
+   *    它与标题同排后必须一眼可见（14px 二级灰）。
+   *
+   * 另外这条用例顺手锁住 headless 的**代价**：宿主 `.header` / `.body` 的内边距
+   * 随 headless 一起消失（前者由 .dim-ah-modalHead 补，后者由 .dim-ah-modalBody
+   * 补），所以正文必须真的包进 .dim-ah-modalBody，否则既没有左右内边距、也会
+   * 越过 `.dim-ah-modal` 的 max-height 后无处可滚。
+   */
+  it('模型列表弹窗自绘标题行：标题与 Provider 名同排，右侧是刷新 + 关闭按钮', () => {
     const panelStart = clientSource.indexOf('function ModelListPanel(')
     const panelEnd = clientSource.indexOf('\n/**', panelStart + 1)
     expect(panelStart, '找不到 ModelListPanel').toBeGreaterThan(-1)
     expect(panelEnd, '无法截取 ModelListPanel').toBeGreaterThan(panelStart)
     const panel = clientSource.slice(panelStart, panelEnd)
+
+    // 走 headless：这两条都是非 headless 分支专属的入参，传了就是**静默失效**
+    // （closeLabel 在 headless 分支上类型非法，contentClassName 不会有人消费）。
+    expect(panel, '标题行自绘必须走 headless（宿主 title 只收字符串、无标题栏插槽）').toContain('headless: true')
+    expect(panel, 'headless 下 closeLabel 无人消费（关闭按钮由本插件自绘）').not.toContain('closeLabel')
+    expect(panel, 'headless 下 contentClassName 无人消费（正文容器由本插件自绘）').not.toContain('contentClassName')
+
+    // 可见标题与 Provider 名都由本插件渲染 —— 前者是「弹窗打开后必须看见标题」，
+    // 后者是「必须看见当前 Provider」。
+    expect(panel, '标题文字没有自绘（弹窗里将看不见「模型列表」）')
+      .toContain("React.createElement('h2', { className: 'dim-ah-modalTitle' }, '模型列表')")
+    expect(panel, 'Provider 名挂进了副标题位')
+      .toContain("className: 'dim-ah-modalSubtitle' }, providerLabel)")
+
+    // 同排判据：一条标题行里，标题 → Provider 名 → 右侧按钮组，顺序与嵌套都成立。
+    const headAt = panel.indexOf("className: 'dim-ah-modalHead'")
+    const titleRowAt = panel.indexOf("className: 'dim-ah-modalTitleRow'")
+    const titleAt = panel.indexOf("className: 'dim-ah-modalTitle'")
+    const subtitleAt = panel.indexOf("className: 'dim-ah-modalSubtitle'")
     const actionsAt = panel.indexOf("className: 'dim-ah-modelPanelActions'")
     const refreshAt = panel.indexOf("'aria-label': '刷新模型列表'")
-    expect(actionsAt, '模型列表弹窗缺少标题行右侧按钮组').toBeGreaterThan(-1)
+    const closeAt = panel.indexOf("'aria-label': '关闭模型列表'")
+    expect(headAt, '模型列表弹窗缺少自绘标题行').toBeGreaterThan(-1)
+    expect(titleRowAt, '标题与 Provider 名缺少同一行的容器').toBeGreaterThan(headAt)
+    expect(titleAt, '标题不在标题行容器内').toBeGreaterThan(titleRowAt)
+    expect(subtitleAt, 'Provider 名没有紧跟标题（两者必须同一行）').toBeGreaterThan(titleAt)
+    expect(actionsAt, '标题与 Provider 名之后缺少右侧按钮组').toBeGreaterThan(subtitleAt)
     expect(refreshAt, '模型列表弹窗缺少刷新按钮').toBeGreaterThan(actionsAt)
+    expect(closeAt, '模型列表弹窗缺少自绘关闭按钮（headless 下宿主不再提供）').toBeGreaterThan(refreshAt)
+
     expect(panel).toContain("className: 'dim-ah-iconBtn'")
     expect(panel).toContain("className: 'dim-ah-iconGlyph'")
     expect(panel).toContain("disabled: phase === 'loading'")
     expect(panel).toContain("'data-loading': phase === 'loading' ? 'true' : undefined")
-    expect(panel).toContain("}, '⟳'))))")
+    expect(panel, '刷新按钮的旋转字形丢失').toContain("}, '⟳'))")
+    expect(panel, '关闭按钮的字形丢失').toContain("}, '✕'))")
+    expect(panel, '刷新按钮应采用与标题同排的 sm 尺寸').toContain("variant: 'outline'")
+    expect(panel, '关闭按钮应为无边框的 ghost 外观').toContain("variant: 'ghost'")
+
+    // 正文进自绘滚动容器（headless 后宿主 .body 不再存在）。
+    const bodyAt = panel.indexOf("className: 'dim-ah-modalBody'")
+    expect(bodyAt, '正文没有包进 .dim-ah-modalBody（列表会紧贴圆角且无处可滚）').toBeGreaterThan(actionsAt)
+    expect(panel).toContain("className: 'dim-ah-modelList'")
+
     expect(panel).not.toContain('modelPanelCount')
     expect(panel).not.toContain('hiddenCount')
     expect(panel).not.toContain('关闭开关后该模型不再出现在对话框的模型选择里；其余模型（含服务端新增的）默认显示。')
     expect(panel).not.toContain("variant: 'primary'")
     expect(styleCode).not.toContain('.dim-ah-modelPanelCount')
+
+    // 样式侧：新容器必须有规则（否则标题与 Provider 名排不到一行），且 Provider 名
+    // 不能再退回三级灰 —— 那正是「看不见 Provider 名」的根因。
+    expect(styleCode, '缺少 .dim-ah-modalTitleRow 规则（标题与 Provider 名无法同排）')
+      .toContain('.dim-ah-modalTitleRow {')
+    const subtitleAt2 = styleCode.indexOf('.dim-ah-modalSubtitle {')
+    expect(subtitleAt2, '缺少 .dim-ah-modalSubtitle 规则').toBeGreaterThan(-1)
+    const subtitleRule = styleCode.slice(subtitleAt2, styleCode.indexOf('}', subtitleAt2))
+    expect(subtitleRule, 'Provider 名必须用可读的二级灰').toContain('--dsw-alias-label-secondary')
+    expect(subtitleRule, 'Provider 名不得退回三级灰（实机上淡到看不出有字）')
+      .not.toContain('--dsw-alias-label-tertiary')
+    expect(subtitleRule, 'Provider 名不得退回 12px').not.toContain('--dsw-font-xxs-12-font-size')
   })
 
   it('样式表无十六进制颜色且不含死 token', () => {

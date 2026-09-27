@@ -1071,25 +1071,27 @@ function ModelListPanel({ provider, rpcCall, onClose }) {
     : null;
 
   /**
-   * 弹窗本体：`Modal` 原语（遮罩 / 居中卡片 / Escape / aria 全部由它负责）。
+   * 弹窗本体：`Modal` 原语负责壳（遮罩 / 居中卡片 / 圆角 / 阴影 / Escape / aria）。
    *
-   * 内容与交互流程仍由标题、副标题、头部刷新按钮、说明、错误提示和四种主体状态组成。
-   * 承载它们的壳换成了设计体系的实现。
+   * ⚠️ 标题行由这里自绘，所以走 `headless`：宿主 `Modal` 的 `title` 只接受
+   * **字符串**（同时用作 `aria-label` 与可见标题），也没有标题栏插槽。非 headless
+   * 时 `children` 会落进宿主 body —— 也就是宿主标题行的**下方**，于是 Provider 名
+   * 与刷新按钮只能另起一行、和标题分了家，Provider 名还只是 12px 的三级灰。
+   * headless 后 `title` 仍撑住可读名，可见标题、Provider 名与关闭按钮一并自绘，
+   * 字号行高对齐宿主 .header / .title（16px / 24px / 500）。
    *
-   * ⚠️ 可读名仍由 `title` 撑住：`Modal` 把它同时用作 `aria-label` 与可见标题。
-   * 迁移前可见标题是「模型列表」+ 副标题 provider 名，故这里 `title` 取
-   * 「模型列表」，provider 名留在 `description` 之外的头部行里（原样渲染）。
+   * 头部一行三块，从左到右：标题、当前 Provider 名、右侧按钮组（刷新 + 关闭）。
    */
   return React.createElement(Modal, {
     open: true,
     onClose,
     title: '模型列表',
-    closeLabel: '关闭模型列表',
+    headless: true,
     className: 'dim-ah-modal',
-    contentClassName: 'dim-ah-modalBody',
   },
     React.createElement('div', { className: 'dim-ah-modalHead' },
-      React.createElement('div', { className: 'dim-ah-modalTitle' },
+      React.createElement('div', { className: 'dim-ah-modalTitleRow' },
+        React.createElement('h2', { className: 'dim-ah-modalTitle' }, '模型列表'),
         React.createElement('span', { className: 'dim-ah-modalSubtitle' }, providerLabel)),
       React.createElement('div', { className: 'dim-ah-modelPanelActions' },
         React.createElement(Button, {
@@ -1103,35 +1105,51 @@ function ModelListPanel({ provider, rpcCall, onClose }) {
           className: 'dim-ah-iconGlyph',
           'data-loading': phase === 'loading' ? 'true' : undefined,
           'aria-hidden': 'true',
-        }, '⟳')))),
-    tierHint
-      ? React.createElement('p', { className: 'dim-ah-modalHint' }, tierHint)
-      : null,
-    toggleError
-      ? React.createElement('div', {
-          className: 'dim-ah-probeNotice',
-          'data-tone': 'error',
-          role: 'alert',
-        }, React.createElement('div', null, toggleError))
-      : null,
-    phase === 'error'
-      ? React.createElement('div', { className: 'dim-ah-empty' },
-          React.createElement('p', null, error),
-          React.createElement(Button, { variant: 'outline', size: 'sm', className: 'dim-ah-btn-stable', onClick: () => void load() }, '重新读取'))
-      : phase === 'loading'
-        ? React.createElement('div', { className: 'dim-ah-empty' }, '正在读取模型列表…')
-        : all.length === 0
-          ? React.createElement('div', { className: 'dim-ah-empty' },
-              React.createElement('p', null, '该 Provider 当前没有可用的模型。'))
-          : React.createElement('div', { className: 'dim-ah-modelList' },
-              all.map(model => React.createElement(ModelToggle, {
-                key: model.id,
-                model,
-                busy: busyIds.has(model.id),
-                onToggle: (id, disabled) => void toggleModel(id, disabled),
-                tierBusy: tierBusyIds.has(model.id),
-                onSelectTier: (id, window) => void selectTier(id, window),
-              }))));
+        }, '⟳')),
+        React.createElement(Button, {
+          variant: 'ghost',
+          size: 'sm',
+          className: 'dim-ah-iconBtn',
+          'aria-label': '关闭模型列表',
+          onClick: onClose,
+        }, React.createElement('span', {
+          className: 'dim-ah-iconGlyph',
+          'aria-hidden': 'true',
+        }, '✕')))),
+    // 正文（说明行 / 失败提示 / 列表）整块进滚动容器。headless 下宿主**不再**渲染
+    // 它自己的 `.body`，而那块原本承担着两件事：内容左右内边距（`padding: 0 24px`）
+    // 与「超出卡片上限后自己滚」。两件事都必须由 `.dim-ah-modalBody` 接管 ——
+    // 少了内边距，列表会紧贴卡片圆角；少了滚动，超过 `.dim-ah-modal` 的 max-height
+    // 的部分既看不见也滚不到。
+    React.createElement('div', { className: 'dim-ah-modalBody' },
+      tierHint
+        ? React.createElement('p', { className: 'dim-ah-modalHint' }, tierHint)
+        : null,
+      toggleError
+        ? React.createElement('div', {
+            className: 'dim-ah-probeNotice',
+            'data-tone': 'error',
+            role: 'alert',
+          }, React.createElement('div', null, toggleError))
+        : null,
+      phase === 'error'
+        ? React.createElement('div', { className: 'dim-ah-empty' },
+            React.createElement('p', null, error),
+            React.createElement(Button, { variant: 'outline', size: 'sm', className: 'dim-ah-btn-stable', onClick: () => void load() }, '重新读取'))
+        : phase === 'loading'
+          ? React.createElement('div', { className: 'dim-ah-empty' }, '正在读取模型列表…')
+          : all.length === 0
+            ? React.createElement('div', { className: 'dim-ah-empty' },
+                React.createElement('p', null, '该 Provider 当前没有可用的模型。'))
+            : React.createElement('div', { className: 'dim-ah-modelList' },
+                all.map(model => React.createElement(ModelToggle, {
+                  key: model.id,
+                  model,
+                  busy: busyIds.has(model.id),
+                  onToggle: (id, disabled) => void toggleModel(id, disabled),
+                  tierBusy: tierBusyIds.has(model.id),
+                  onSelectTier: (id, window) => void selectTier(id, window),
+                })))));
 }
 
 /**
@@ -1162,21 +1180,39 @@ const CONSUMPTION_SWITCH_OPTIONS = [
 const CONSUMPTION_DEFAULTS = { order: 'round-robin', switch: 'per-turn' };
 
 function ConsumptionSelect({ name, label, options, value, busy, onSelect }) {
-  const selectedValue = options.some(option => option.value === value)
-    ? value
-    : options[0]?.value || '';
+  const [open, setOpen] = React.useState(false);
+  const current = options.find(option => option.value === value);
+  const items = options.map(option => ({
+    id: option.value,
+    // 每档自己的说明仍挂在菜单项上，展开列表时逐档可见。
+    label: withHoverTitle(React.createElement('span', null, option.label), option.hint),
+  }));
   return React.createElement('div', { className: 'dim-ah-consumptionGroup', 'data-name': name },
-    React.createElement('select', {
-      className: 'dim-ah-select',
-      'aria-label': label,
-      value: selectedValue,
-      disabled: busy,
-      onChange: (event) => onSelect(event.target.value),
-    }, ...options.map(option => React.createElement('option', {
-      key: option.value,
-      value: option.value,
-      title: option.hint,
-    }, option.label))));
+    React.createElement(Menu, {
+      open,
+      // 锚点是**宿主设置页同款的胶囊按钮**：ui-primitives 没有 Select /
+      // DropdownMenu 导出，宿主自己也这么拼（LanguageRow / PreferenceRow 的
+      // 「Menu 原语 + 自建胶囊」），几何与配色见 .dim-ah-selectAnchor。
+      anchor: React.createElement('button', {
+        type: 'button',
+        className: 'dim-ah-selectAnchor',
+        'aria-label': label,
+        'aria-haspopup': 'menu',
+        'aria-expanded': open,
+        disabled: busy,
+        onClick: () => setOpen(prev => !prev),
+      },
+      current ? current.label : value,
+      React.createElement(IconChevronDownOutlineRegular, { className: 'dim-ah-selectAnchorChevron' })),
+      items,
+      // 「弹层宽度 = 按钮宽度」：宿主 Menu 的列表默认是内容宽（min-width: 144px），
+      // 与锚点无关，故必须给列表一个类名把它钉到 100%（见样式表）。
+      listClassName: 'dim-ah-consumptionMenu',
+      selectedId: value,
+      onSelect: (id) => { setOpen(false); onSelect(id); },
+      onClose: () => setOpen(false),
+      align: 'start',
+    }));
 }
 
 /**
@@ -1190,7 +1226,8 @@ function ConsumptionSelect({ name, label, options, value, busy, onSelect }) {
  *
  * ⚠️ 界面上**刻意没有**可见的设置名、解释文案与外框：需求是「就两个下拉」。
  * 下拉与账号卡片之间也不再有任何提示段落（原先那条排序提示已删除）。设置名通过
- * `aria-label` 提供；各档说明挂在原生 `option` 的 `title` 上。
+ * `aria-label` 提供；各档说明挂在**菜单项本身**（`withHoverTitle` 包住选项文案），
+ * 展开列表时逐档可悬停查看。
  *
  * ## 为什么是受控组件 + 不做乐观更新
  *
@@ -2321,18 +2358,20 @@ function AutoRouteSelect({ label, options, value, busy, disabled, fallback, tool
   }));
   return withHoverTitle(React.createElement(Menu, {
     open,
-    anchor: React.createElement(Button, {
-      variant: 'outline',
-      size: 'sm',
-      className: 'dim-ah-arEntryMenu',
+    // 锚点与其它两处下拉共用宿主同款胶囊（见 ConsumptionSelect 处的说明）；
+    // 宽度由 .dim-ah-arEntryRow 的后代规则钉满栅格列。
+    anchor: React.createElement('button', {
+      type: 'button',
+      className: 'dim-ah-selectAnchor',
       // 可读名只来自这里（界面上三档下拉的可见文案只有当前值）。
       'aria-label': label,
       'aria-haspopup': 'menu',
       'aria-expanded': open,
       disabled: busy || disabled === true,
-      icon: React.createElement(IconChevronDownOutlineRegular),
       onClick: () => setOpen(prev => !prev),
-    }, current ? current.label : (value || fallback)),
+    },
+    current ? current.label : (value || fallback),
+    React.createElement(IconChevronDownOutlineRegular, { className: 'dim-ah-selectAnchorChevron' })),
     items,
     // 空串（「默认」/未选）不进 selectedId：`Menu` 的 undefined 才是「没有选中项」。
     selectedId: value || undefined,
@@ -2343,16 +2382,18 @@ function AutoRouteSelect({ label, options, value, busy, disabled, fallback, tool
 }
 
 /**
- * 一条候选（def 卡片里的一行）：供应商 → 模型 → 思考程度三个联动下拉 + 删除 + 拖拽。
+ * 一条候选（def 卡片里的一行）：一行可点击文本 + 删除按钮 + 拖拽手柄。
  *
- * ## 联动
+ * ## 行上只留一行文本，三档下拉搬进弹窗（task-45 用户反馈）
  *
- * - 换供应商 ⇒ 清空模型与档位（旧的模型/档位属于上一个供应商，留着就是非法配置）；
- * - 换模型 ⇒ 清空档位（档位表是按模型问出来的）；
- * - 档位「默认」⇒ 清掉 `effort` 键（见 {@link AUTO_ROUTE_DEFAULT_EFFORT}）。
+ * 行文本规则（见 `description`）：
+ * - 供应商未选 ⇒ 「选择供应商」；
+ * - 供应商已选、模型未选 ⇒ 「选择模型」；
+ * - 都选了 ⇒ `模型(档位)-供应商显示名`；档位为空（「默认」）时省略括号段。
  *
- * 清空动作都在**面板**里做（`onSelectField`），本组件只负责把选中事件报上去 ——
- * 草稿的唯一所有者是面板。
+ * 点击文本打开 {@link AutoRouteEntryEditor}，三档下拉在弹窗里逐级选。删除按钮与
+ * 拖拽手柄**留在行上**（弹窗外）：它们与「编辑这条候选的取值」是两件事，收进弹窗
+ * 会让删除多一次开合。
  *
  * ## 档位按需拉取
  *
@@ -2360,34 +2401,25 @@ function AutoRouteSelect({ label, options, value, busy, disabled, fallback, tool
  * 请求一次 `autoroute.model-info`；缓存与去重在面板里（同一个 provider+model
  * 在多行里出现时只拉一次）。
  *
- * 未加载完成（`effortInfo === undefined`）时**不禁用**下拉：禁用一个还在加载的控件
- * 会让用户以为这个模型没有档位。加载完成后确实无档位（`efforts` 为空）才禁用，
- * 并挂上「该模型无思考档位」的悬停说明。
+ * ⚠️ 拉取留在**行**上而不是弹窗里：档位是「这条候选的模型」的属性，行一挂载就该问
+ * —— 搬进弹窗会让没打开过弹窗的候选永远拉不到档位，行文本里的档位也就无从显示。
+ * 在途/无档位的禁用与提示语全在编辑器里（判据见 {@link AutoRouteEntryEditor}）。
  */
 function AutoRouteEntryRow({
-  entry, index, catalog, effortInfo, busy, drag, onNeedEffort, onSelectField, onRemove,
+  entry, index, catalog, busy, drag, onNeedEffort, onRemove, onEdit,
 }) {
   const providerGroup = catalog.find(group => group.id === entry.provider);
-  const providerOptions = catalog.map(group => ({ id: group.id, label: group.name }));
-  const modelOptions = (providerGroup ? providerGroup.models : []).map(model => ({ id: model.id, label: model.name }));
-  const efforts = effortInfo && Array.isArray(effortInfo.efforts) ? effortInfo.efforts : [];
-  // ⚠️ 判据必须带 `loading !== true`：请求在途时占位就是 `{ loading: true, efforts: [] }`，
-  // 光看 `efforts.length === 0` 会把「还没问」误判成「问过了、没有档位」——
-  // 用户会在下拉上读到「该模型无思考档位」这个**错误结论**。占位期间显示禁用态
-  // （避免对着空列表选），但提示语是「正在加载思考档位…」。
-  const effortLoading = effortInfo !== undefined && effortInfo.loading === true;
-  const noEfforts = effortInfo !== undefined && !effortLoading && efforts.length === 0;
-  // 「默认」= 不配 effort。有默认档数据时把档名带进悬停说明，用户才知道「默认」是什么。
-  const defaultEffortHint = effortInfo && typeof effortInfo.defaultEffort === 'string'
-    ? `不指定档位，用该模型的默认档（${effortInfo.defaultEffort}）`
-    : '不指定档位，用该模型的默认档';
-  const effortOptions = [{ id: AUTO_ROUTE_DEFAULT_EFFORT, label: withHoverTitle(React.createElement('span', null, AUTO_ROUTE_DEFAULT_EFFORT_LABEL), defaultEffortHint) }]
-    .concat(efforts.map(effort => ({ id: effort, label: effort })));
-  const effortTooltip = noEfforts
-    ? AUTO_ROUTE_EFFORT_NONE_HELP
-    : effortLoading
-      ? AUTO_ROUTE_EFFORT_LOADING_HELP
-      : (entry.model ? undefined : AUTO_ROUTE_MODEL_FIRST_HELP);
+  // 供应商显示名与模型列表弹窗同一写法（PROVIDERS 是品牌名的唯一真相源）；
+  // 目录组名与裸 id 是兜底 —— 目录里出现 PROVIDERS 之外的 id 时不能显示 undefined。
+  const providerLabel = PROVIDERS.find(p => p.id === entry.provider)?.label
+    || (providerGroup ? providerGroup.name : entry.provider);
+  const description = entry.provider === ''
+    ? '选择供应商'
+    : entry.model === ''
+      ? '选择模型'
+      : `${entry.model}${entry.effort ? `(${entry.effort})` : ''}-${providerLabel}`;
+  // 占位文案（还没选全）与已配好的取值用不同色档区分，见 .dim-ah-arEntryText。
+  const placeholder = entry.provider === '' || entry.model === '';
 
   // 挂载/换模型时按需拉一次档位（去重与缓存都在面板里）。
   React.useEffect(() => {
@@ -2414,36 +2446,14 @@ function AutoRouteEntryRow({
           'aria-hidden': 'true',
         }, '⠿')
       : null,
-    React.createElement(AutoRouteSelect, {
-      label: '候选供应商',
-      options: providerOptions,
-      value: entry.provider,
-      busy,
-      fallback: '选择供应商',
-      onSelect: (id) => onSelectField(index, 'provider', id),
-    }),
-    React.createElement(AutoRouteSelect, {
-      label: '候选模型',
-      options: modelOptions,
-      value: entry.model,
-      busy,
-      // 供应商未选时模型无从选起（options 也是空的）。
-      disabled: entry.provider === '',
-      fallback: '选择模型',
-      tooltip: entry.provider === '' ? AUTO_ROUTE_PROVIDER_FIRST_HELP : undefined,
-      onSelect: (id) => onSelectField(index, 'model', id),
-    }),
-    React.createElement(AutoRouteSelect, {
-      label: '思考程度',
-      options: effortOptions,
-      value: entry.effort === undefined ? AUTO_ROUTE_DEFAULT_EFFORT : entry.effort,
-      busy,
-      // 在途也禁用（占位里没有可选项），但提示语与「无档位」不同 —— 见 noEfforts。
-      disabled: entry.model === '' || noEfforts || effortLoading,
-      fallback: AUTO_ROUTE_DEFAULT_EFFORT_LABEL,
-      tooltip: effortTooltip,
-      onSelect: (id) => onSelectField(index, 'effort', id),
-    }),
+    React.createElement('button', {
+      type: 'button',
+      className: 'dim-ah-arEntryText',
+      'data-placeholder': placeholder ? 'true' : undefined,
+      'aria-label': `编辑候选 ${index + 1}：${description}`,
+      disabled: busy,
+      onClick: () => onEdit(index),
+    }, description),
     React.createElement(Button, {
       variant: 'outline',
       size: 'sm',
@@ -2451,6 +2461,74 @@ function AutoRouteEntryRow({
       disabled: busy,
       onClick: () => onRemove(index),
     }, '删除'));
+}
+
+/**
+ * 候选编辑弹窗：供应商 / 模型 / 思考程度各占一行，下拉仍复用 AutoRouteSelect。
+ *
+ * 弹窗只负责挂载控件；草稿唯一所有者仍是 AutoRoutePanel，选中动作直接回调面板的
+ * onSelectField，因此级联清空、修改即保存、默认档哨兵值都沿用原有写路径。
+ */
+function AutoRouteEntryEditor({ entry, index, catalog, effortInfo, busy, onSelectField, onClose }) {
+  const providerGroup = catalog.find(group => group.id === entry.provider);
+  const providerOptions = catalog.map(group => ({ id: group.id, label: group.name }));
+  const modelOptions = (providerGroup ? providerGroup.models : []).map(model => ({ id: model.id, label: model.name }));
+  const efforts = effortInfo && Array.isArray(effortInfo.efforts) ? effortInfo.efforts : [];
+  // 在途占位必须与「问过且无档位」分开，否则会给用户错误结论。
+  const effortLoading = effortInfo !== undefined && effortInfo.loading === true;
+  const noEfforts = effortInfo !== undefined && !effortLoading && efforts.length === 0;
+  const defaultEffortHint = effortInfo && typeof effortInfo.defaultEffort === 'string'
+    ? `不指定档位，用该模型的默认档（${effortInfo.defaultEffort}）`
+    : '不指定档位，用该模型的默认档';
+  const effortOptions = [{
+    id: AUTO_ROUTE_DEFAULT_EFFORT,
+    label: withHoverTitle(React.createElement('span', null, AUTO_ROUTE_DEFAULT_EFFORT_LABEL), defaultEffortHint),
+  }].concat(efforts.map(effort => ({ id: effort, label: effort })));
+  const effortTooltip = noEfforts
+    ? AUTO_ROUTE_EFFORT_NONE_HELP
+    : effortLoading
+      ? AUTO_ROUTE_EFFORT_LOADING_HELP
+      : (entry.model ? undefined : AUTO_ROUTE_MODEL_FIRST_HELP);
+  const fieldRow = (label, select) => React.createElement('div', { className: 'dim-ah-arEditorRow' },
+    React.createElement('span', { className: 'dim-ah-arEditorLabel' }, label),
+    select);
+
+  return React.createElement(Modal, {
+    open: true,
+    onClose,
+    title: '编辑候选',
+    closeLabel: '关闭编辑候选',
+    className: 'dim-ah-modal',
+  },
+    React.createElement('div', { className: 'dim-ah-arEditor' },
+      fieldRow('供应商', React.createElement(AutoRouteSelect, {
+        label: '候选供应商',
+        options: providerOptions,
+        value: entry.provider,
+        busy,
+        fallback: '选择供应商',
+        onSelect: (id) => onSelectField('provider', id),
+      })),
+      fieldRow('模型', React.createElement(AutoRouteSelect, {
+        label: '候选模型',
+        options: modelOptions,
+        value: entry.model,
+        busy,
+        disabled: entry.provider === '',
+        fallback: '选择模型',
+        tooltip: entry.provider === '' ? AUTO_ROUTE_PROVIDER_FIRST_HELP : undefined,
+        onSelect: (id) => onSelectField('model', id),
+      })),
+      fieldRow('思考程度', React.createElement(AutoRouteSelect, {
+        label: '思考程度',
+        options: effortOptions,
+        value: entry.effort === undefined ? AUTO_ROUTE_DEFAULT_EFFORT : entry.effort,
+        busy,
+        disabled: entry.model === '' || noEfforts || effortLoading,
+        fallback: AUTO_ROUTE_DEFAULT_EFFORT_LABEL,
+        tooltip: effortTooltip,
+        onSelect: (id) => onSelectField('effort', id),
+      }))));
 }
 
 /**
@@ -2500,6 +2578,9 @@ function AutoRoutePanel({ rpcCall }) {
   const [efforts, setEfforts] = React.useState({});
   // 待确认删除的定义 id（`Modal` 二键确认，取代原生 confirm）。
   const [pendingDelete, setPendingDelete] = React.useState(null);
+  // 当前打开的候选编辑目标（`{ defId, index }`）；弹窗全面板只挂一份，关闭即完成
+  // （修改已即时保存，无保存按钮）。
+  const [editing, setEditing] = React.useState(null);
   /**
    * 拖拽状态（定义卡片与候选行**共用一份**，靠 `kind` + `defId` 区分作用域）。
    *
@@ -2853,13 +2934,11 @@ function AutoRoutePanel({ rpcCall }) {
           entry,
           index: entryIndex,
           catalog,
-          effortInfo: entry.provider !== '' && entry.model !== ''
-            ? efforts[autoRouteEffortKey(entry.provider, entry.model)]
-            : undefined,
           busy: saving,
           drag: dragPropsFor('entry', def.id, String(entryIndex), def.entries.length),
+          // 档位拉取留在行上（见 AutoRouteEntryRow 的说明）；三个下拉的挂载点是弹窗。
           onNeedEffort: requestEfforts,
-          onSelectField: (rowIndex, field, value) => setEntryField(def.id, rowIndex, field, value),
+          onEdit: (rowIndex) => setEditing({ defId: def.id, index: rowIndex }),
           onRemove: (rowIndex) => removeEntry(def.id, rowIndex),
         })),
         React.createElement('div', { className: 'dim-ah-arAddEntry' },
@@ -2875,6 +2954,25 @@ function AutoRoutePanel({ rpcCall }) {
   const pendingDefinition = pendingDelete === null
     ? null
     : draft.find(def => def.id === pendingDelete) || null;
+
+  /**
+   * 当前编辑目标：解析成「条目本体 + 所属定义 id」。
+   *
+   * ⚠️ 必须**每次渲染现算**、不能把 entry 本体存进 `editing`：草稿会被宿主返回值
+   * 覆盖（`saveModels` 成功分支），存一份副本会让弹窗继续显示被覆盖掉的旧取值，
+   * 用户下一笔编辑就基于一个已经不存在的状态。存 `{ defId, index }` 则天然跟随草稿，
+   * 每选一级都会立刻反映到弹窗里（模型列表跟着供应商换、档位跟着模型换）。
+   *
+   * 目标不存在（那条候选刚被删掉）时回 null，弹窗静默关闭 —— 与 `pendingDefinition`
+   * 同一条取舍，绝不对着不存在的条目挂控件。
+   */
+  const editingEntry = editing === null
+    ? null
+    : (() => {
+        const def = draft.find(item => item.id === editing.defId);
+        const entry = def ? def.entries[editing.index] : undefined;
+        return entry === undefined ? null : { defId: editing.defId, index: editing.index, entry };
+      })();
 
   return React.createElement('section', { className: 'dim-ah-arPage', 'aria-label': '自动路由配置' },
     React.createElement('div', { className: 'dim-ah-arHead' },
@@ -2949,6 +3047,22 @@ function AutoRoutePanel({ rpcCall }) {
             }, '删除'),
           ],
         })
+      : null,
+    // 候选编辑弹窗：全面板只挂一份，编辑目标由 `editing` 指定（`{ defId, index }`）。
+    // 目标被删掉 / 草稿被宿主返回值覆盖到没有这一条时静默不渲染 —— 与
+    // `pendingDefinition` 同一条取舍，绝不对着不存在的条目渲染控件。
+    editingEntry !== null
+      ? React.createElement(AutoRouteEntryEditor, {
+          entry: editingEntry.entry,
+          index: editingEntry.index,
+          catalog,
+          effortInfo: editingEntry.entry.provider !== '' && editingEntry.entry.model !== ''
+            ? efforts[autoRouteEffortKey(editingEntry.entry.provider, editingEntry.entry.model)]
+            : undefined,
+          busy: saving,
+          onSelectField: (field, value) => setEntryField(editingEntry.defId, editingEntry.index, field, value),
+          onClose: () => setEditing(null),
+        })
       : null);
 }
 
@@ -3011,9 +3125,10 @@ export function __resetUpdateUiForTests() {
 /**
  * 更新通道下拉：正式（GitHub release）/ Beta（master 提交）。
  *
- * 形态复用 `ConsumptionSelect` 的 Menu + Button 锚点范式 —— 宿主 ui-primitives
- * 没有 Select 导出，Menu 是本仓库唯一在测试替身里验证过的下拉范式；锚点文案
- * 即当前通道名，切换立即触发一次检查（用户拍板的行为）。
+ * 形态复用 `ConsumptionSelect` 的「Menu 原语 + 自建胶囊锚点」范式（也就是宿主
+ * 设置页 LanguageRow / PreferenceRow 的做法）—— ui-primitives 没有 Select 导出，
+ * Menu 是本仓库唯一在测试替身里验证过的下拉范式；锚点文案即当前通道名，
+ * 切换立即触发一次检查（用户拍板的行为）。
  *
  * `busy`（检查中 / 更新中）时锚点禁用：切换通道会立刻发起一次新检查，
  * 与在途的旧检查并发交错，后返回的旧结果会覆盖新通道的状态（乱序竞态）。
@@ -3023,17 +3138,17 @@ function ChannelSelect({ channel, busy, onSelect }) {
   const current = channel === 'beta' ? 'Beta' : '正式';
   return React.createElement(Menu, {
     open,
-    anchor: React.createElement(Button, {
-      variant: 'outline',
-      size: 'sm',
-      className: 'dim-ah-channelBtn',
+    anchor: React.createElement('button', {
+      type: 'button',
+      className: 'dim-ah-selectAnchor',
       'aria-label': '更新通道',
       'aria-haspopup': 'menu',
       'aria-expanded': open,
       disabled: busy,
-      icon: React.createElement(IconChevronDownOutlineRegular),
       onClick: () => setOpen(prev => !prev),
-    }, current),
+    },
+    current,
+    React.createElement(IconChevronDownOutlineRegular, { className: 'dim-ah-selectAnchorChevron' })),
     items: [
       { id: 'stable', label: '正式' },
       { id: 'beta', label: 'Beta' },

@@ -375,6 +375,8 @@ const constValueOf = (name: string): string => {
 const AUTO_ROUTE_SWITCH_HELP = constValueOf('AUTO_ROUTE_SWITCH_HELP')
 const AUTO_ROUTE_EFFORT_NONE_HELP = constValueOf('AUTO_ROUTE_EFFORT_NONE_HELP')
 const AUTO_ROUTE_EFFORT_LOADING_HELP = constValueOf('AUTO_ROUTE_EFFORT_LOADING_HELP')
+// 模型下拉在「供应商还没选」时挂的引导提示（弹窗里那条）。
+const AUTO_ROUTE_PROVIDER_FIRST_HELP = constValueOf('AUTO_ROUTE_PROVIDER_FIRST_HELP')
 
 /** 目录替身：两个供应商，各自两个 / 一个模型。 */
 const CATALOG = {
@@ -498,9 +500,90 @@ function rowsInCard(card: ElementNode): ElementNode[] {
   return elementsOf(card).filter((el) => hasClass(el, 'dim-ah-arEntryRow'))
 }
 
-/** 一个节点子树里的全部 Menu（含替身挂出来的自身 props）。 */
+/**
+ * 一个节点子树里的全部 Menu（含替身挂出来的自身 props）。
+ *
+ * ⚠️ 候选行的三个下拉本轮搬进了**编辑弹窗**（用户反馈：一行三枚胶囊太挤），
+ * 行内已经**没有** Menu —— 想读/改候选取值，必须先把弹窗打开（见 `openEditor`）。
+ */
 function menusIn(node: unknown): ElementNode[] {
   return elementsOf(node).filter((el) => el.menuProps !== undefined)
+}
+
+/**
+ * 候选行上的描述按钮（点它打开候选编辑弹窗）。
+ *
+ * 行文本是候选取值在列表里的**唯一可见投影**（「选择供应商」/「选择模型」/
+ * `模型(档位)-供应商`），故它既是可点入口，也是「行渲染对了没有」的断言对象。
+ */
+function entryTextOf(row: ElementNode): ElementNode {
+  const button = elementsOf(row).find((el) => hasClass(el, 'dim-ah-arEntryText'))
+  if (button === undefined) throw new Error('候选行里找不到描述按钮（行文本未接线？）')
+  return button
+}
+
+/** 点开某条候选的编辑弹窗并重渲染，返回「弹窗已打开」的树。 */
+async function openEditor(
+  tree: unknown,
+  rpcCall: unknown,
+  cardIndex: number,
+  rowIndex: number,
+): Promise<unknown> {
+  const row = rowsInCard(cardsOf(tree)[cardIndex]!)[rowIndex]!
+  ;(entryTextOf(row).props.onClick as () => void)()
+  for (let i = 0; i < 12; i++) await Promise.resolve()
+  return settle(client.AutoRoutePanel, panelProps(rpcCall), client.hooks)
+}
+
+/**
+ * 候选编辑弹窗的 dialog 节点（className 为 `.dim-ah-modal`）。
+ *
+ * ⚠️ 不复用 `modalRoot`：删除定义的确认弹窗也是 `ui-modal-root`，两个弹窗同形，
+ * 按「弹窗根」找会把两者混在一起。`.dim-ah-modal` 是候选编辑弹窗独有的类名。
+ */
+function editorRoot(tree: unknown): ElementNode | undefined {
+  return elementsOf(tree).find((el) => el.props.className === 'dim-ah-modal')
+}
+
+/** 弹窗里的三个下拉，顺序即 DOM 顺序：供应商 → 模型 → 思考程度。 */
+function editorMenus(tree: unknown): ElementNode[] {
+  const root = editorRoot(tree)
+  if (root === undefined) throw new Error('没有打开的候选编辑弹窗（弹窗未接线？）')
+  const menus = menusIn(root)
+  if (menus.length !== 3) throw new Error(`候选编辑弹窗里应当有三个下拉，实际 ${menus.length} 个`)
+  return menus
+}
+
+/** 行文本（描述按钮的可见文案）——「这条候选长什么样」在列表里的唯一投影。 */
+const entryTextOf2 = (row: ElementNode): string => textsOf(entryTextOf(row)).join('')
+
+/** 一张卡片内每条候选的行文本（顺序即 DOM 顺序）。 */
+const entryTextsOf = (card: ElementNode): string[] => rowsInCard(card).map(entryTextOf2)
+
+/**
+ * 一张卡片内每条候选的取值，**不打开弹窗**就能读（顺序即 DOM 顺序）。
+ *
+ * 三档下拉搬进弹窗后，取值在列表里只剩一个投影：行文本按钮的 `aria-label`
+ * （`编辑候选 N：<description>`）与它的可见文案同值。故这里从 `aria-label` 还原
+ * `{ provider, model, effort? }` —— 拖拽那组用例只关心「搬过来的是整条候选」，
+ * 为它逐条开弹窗既啰嗦又会把弹窗状态搅进拖拽断言里。
+ *
+ * ⚠️ 供应商在 description 里是**显示名**（`模型(档位)-供应商`），故用本用例喂给
+ * 面板的那份 `CATALOG` 反查 id —— 那正是面板拿到的事实来源，不额外硬编码映射。
+ * 显示名在 `PROVIDERS` 与目录组名之间可能分叉，本替身里两者同值（`DSH` / `Codearts`）。
+ */
+function entryValuesOf(card: ElementNode): Array<{ provider: string; model: string; effort?: string }> {
+  return rowsInCard(card).map((row) => {
+    const label = String(entryTextOf(row).props['aria-label'] ?? '')
+    const description = label.replace(/^编辑候选 \d+：/, '')
+    const group = CATALOG.providers.find((item) => description.endsWith(`-${item.name}`))
+    if (group === undefined) throw new Error(`行文本里读不出供应商（aria-label 形态变了？）：${label}`)
+    const head = description.slice(0, description.length - group.name.length - 1)
+    const withEffort = /^(.*)\(([^()]*)\)$/.exec(head)
+    return withEffort !== null
+      ? { provider: group.id, model: withEffort[1]!, effort: withEffort[2]! }
+      : { provider: group.id, model: head }
+  })
 }
 
 /** 一张卡片内的名称输入框。 */
@@ -521,25 +604,26 @@ function selectInMenu(menu: ElementNode, id: string): void {
 }
 
 /**
- * 一张卡片内三条候选下拉各自的当前值（按 Menu 的 `selectedId` 读）。
+ * **已打开**的候选编辑弹窗里三个下拉各自的当前值（按 Menu 的 `selectedId` 读）。
  *
  * ⚠️ 读 `selectedId` 而不是锚点文案：`selectedId` 是**写给 Menu 的取值**本身，
  * 而锚点文案是它对用户的可读投影。两者分叉（例如「默认」档用空串哨兵值，
  * 锚点显示「默认」而 selectedId 必须是 undefined）时，只有读前者才看得见。
+ *
+ * ⚠️ 取值只存在于弹窗里（行上已没有下拉），故读之前必须先 `openEditor`；
+ * 想断言「列表里这条候选长什么样」用 `entryTextsOf`（行文本是唯一投影）。
  */
-function entryValuesOf(card: ElementNode): Array<{
+function editorValuesOf(tree: unknown): {
   provider: string | undefined
   model: string | undefined
   effort: string | undefined
-}> {
-  return rowsInCard(card).map((row) => {
-    const menus = menusIn(row)
-    return {
-      provider: menus[0]?.menuProps?.selectedId,
-      model: menus[1]?.menuProps?.selectedId,
-      effort: menus[2]?.menuProps?.selectedId,
-    }
-  })
+} {
+  const menus = editorMenus(tree)
+  return {
+    provider: menus[0]!.menuProps!.selectedId,
+    model: menus[1]!.menuProps!.selectedId,
+    effort: menus[2]!.menuProps!.selectedId,
+  }
 }
 
 /** 一个能喂给拖拽回调的最小事件替身（分界线 140，见 `dropPositionFromPointer`）。 */
@@ -814,13 +898,15 @@ describe('AutoRoutePanel：草稿编辑（修改即保存）', () => {
 
     const rows = rowsInCard(cardsOf(tree)[0]!)
     expect(rows).toHaveLength(2)
-    const values = entryValuesOf(cardsOf(tree)[0]!)
-    expect(values[1], '新条目的三级都应当是空的').toEqual({
+    // 行文本是「这条候选长什么样」在列表里的唯一投影：三级全空 ⇒ 引导语
+    // 「选择供应商」（不是空白行 —— 空行看起来像坏掉的控件）。
+    expect(entryTextsOf(cardsOf(tree)[0]!)[1], '三级全空时行文本应当是引导语').toBe('选择供应商')
+
+    // 取值只存在于编辑弹窗里（行上已没有下拉），故打开它读三个下拉。
+    tree = await openEditor(tree, rpcCall, 0, 1)
+    expect(editorValuesOf(tree), '新条目的三级都应当是空的').toEqual({
       provider: undefined, model: undefined, effort: undefined,
     })
-    // 锚点显示引导文案而不是空白（空锚点看起来像坏掉的控件）。
-    expect(textsOf(rows[1]!)).toContain('选择供应商')
-    expect(textsOf(rows[1]!)).toContain('选择模型')
   })
 
   it('中间态逐级填：加空候选、只选供应商都不提交，填全的那一刻才提交一次', async () => {
@@ -840,18 +926,20 @@ describe('AutoRoutePanel：草稿编辑（修改即保存）', () => {
     expect(rowsInCard(cardsOf(tree)[0]!), '新候选应当已经进了本地草稿（不是被前端拦下）').toHaveLength(2)
     expect(sets(), 'provider 与 model 都空：一次都不该提交').toHaveLength(0)
 
+    // 三档下拉在编辑弹窗里（行上只有一行文本 + 删除），故先点开它。
+    tree = await openEditor(tree, rpcCall, 0, 1)
+
     // 第二步：只选供应商 —— 草稿合法了吗？没有，model 还是空串。
-    let menus = menusIn(rowsInCard(cardsOf(tree)[0]!)[1]!)
-    selectInMenu(menus[0]!, 'dsh')
+    selectInMenu(editorMenus(tree)[0]!, 'dsh')
     for (let i = 0; i < 12; i++) await Promise.resolve()
     tree = await settle(client.AutoRoutePanel, panelProps(rpcCall), client.hooks)
-    expect(entryValuesOf(cardsOf(tree)[0]!)[1]!.provider, '本地草稿要认下这一笔').toBe('dsh')
+    expect(editorValuesOf(tree).provider, '本地草稿要认下这一笔').toBe('dsh')
     expect(sets(), 'model 还空着：仍不该提交').toHaveLength(0)
     expect(errorLinesOf(tree), '中间态不该冒出任何错误行').toHaveLength(0)
 
     // 第三步：补上 model ⇒ 整份草稿第一次变合法，提交恰好一次。
-    menus = menusIn(rowsInCard(cardsOf(tree)[0]!)[1]!)
-    selectInMenu(menus[1]!, 'deepseek-v4')
+    // （弹窗在编辑期间保持打开，故仍从弹窗里读那三个下拉。）
+    selectInMenu(editorMenus(tree)[1]!, 'deepseek-v4')
     for (let i = 0; i < 12; i++) await Promise.resolve()
     tree = await settle(client.AutoRoutePanel, panelProps(rpcCall), client.hooks)
 
@@ -871,8 +959,9 @@ describe('AutoRoutePanel：草稿编辑（修改即保存）', () => {
     const { rpcCall } = makeRpc()
     let tree = await settle(client.AutoRoutePanel, panelProps(rpcCall), client.hooks, true)
     // 第二张卡片的第二条候选：provider=codearts / model=glm-5 / effort=high。
-    let row = rowsInCard(cardsOf(tree)[1]!)[1]!
-    let menus = menusIn(row)
+    // 三档下拉在编辑弹窗里，故先点开这一行。
+    tree = await openEditor(tree, rpcCall, 1, 1)
+    let menus = editorMenus(tree)
     expect(menus[0]!.menuProps!.items!.map((i) => i.id), '供应商下拉来自 catalog').toEqual(['dsh', 'codearts'])
     expect(menus[1]!.menuProps!.items!.map((i) => i.id), '模型下拉来自所选供应商那一组').toEqual(['glm-5'])
 
@@ -880,10 +969,9 @@ describe('AutoRoutePanel：草稿编辑（修改即保存）', () => {
     selectInMenu(menus[0]!, 'dsh')
     tree = await settle(client.AutoRoutePanel, panelProps(rpcCall), client.hooks)
 
-    row = rowsInCard(cardsOf(tree)[1]!)[1]!
-    menus = menusIn(row)
+    menus = editorMenus(tree)
     expect(menus[1]!.menuProps!.items!.map((i) => i.id), '换供应商后模型 options 应当跟着换').toEqual(['deepseek-v4', 'deepseek-v4-flash'])
-    const values = entryValuesOf(cardsOf(tree)[1]!)[1]!
+    const values = editorValuesOf(tree)
     expect(values.provider).toBe('dsh')
     // 旧的 model / effort 属于上一个供应商，留着就是非法配置。
     expect(values.model, '换供应商必须清掉模型').toBeUndefined()
@@ -896,13 +984,17 @@ describe('AutoRoutePanel：草稿编辑（修改即保存）', () => {
     ;(findButtonByText(cardsOf(tree)[0]!, '添加模型')!.props.onClick as () => void)()
     tree = await settle(client.AutoRoutePanel, panelProps(rpcCall), client.hooks)
 
-    const row = rowsInCard(cardsOf(tree)[0]!)[1]!
-    const menus = menusIn(row)
+    // 禁用态长在弹窗里的锚点上（行上已没有下拉），故先点开这一行。
+    tree = await openEditor(tree, rpcCall, 0, 1)
+    const menus = editorMenus(tree)
     // 三个锚点里，模型与档位都应当 disabled（供应商空 ⇒ 模型空 ⇒ 档位空）。
-    const anchors = elementsOf(row).filter((el) => el.props['aria-haspopup'] === 'menu')
+    const anchors = elementsOf(editorRoot(tree)!).filter((el) => el.props['aria-haspopup'] === 'menu')
     expect(anchors[1]!.props.disabled, '供应商未选时模型下拉应当禁用').toBe(true)
     expect(anchors[2]!.props.disabled, '模型未选时档位下拉应当禁用').toBe(true)
     expect(menus[1]!.menuProps!.items, '未选供应商时模型 options 为空').toEqual([])
+    // 引导提示挂在被禁用的模型锚点上（禁用的控件自己说不出「为什么不能点」）。
+    expect(elementsOf(editorRoot(tree)!).find((el) => el.props['data-tooltip'] === AUTO_ROUTE_PROVIDER_FIRST_HELP),
+      '未选供应商时模型下拉应当带「先选供应商」提示').toBeDefined()
   })
 
   it('删除定义走二键确认弹窗：取消不删、确认才删（不用原生 confirm）', async () => {
@@ -954,32 +1046,35 @@ describe('AutoRoutePanel：思考档位（按需拉取 + 缓存）', () => {
 
   it('有档位时逐档列出 + 「默认」，且选中值跟随草稿的 effort', async () => {
     const { rpcCall } = makeRpc()
-    const tree = await settle(client.AutoRoutePanel, panelProps(rpcCall), client.hooks, true)
-    const row = rowsInCard(cardsOf(tree)[0]!)[0]!
-    const effortMenu = menusIn(row)[2]!
+    let tree = await settle(client.AutoRoutePanel, panelProps(rpcCall), client.hooks, true)
+    // 档位下拉在编辑弹窗里（行上只有一行文本），故先点开这一条候选。
+    tree = await openEditor(tree, rpcCall, 0, 0)
+    const effortMenu = editorMenus(tree)[2]!
     // 选项 = 「默认」+ 宿主返回的两档（顺序即宿主给的偏好顺序）。
     expect(effortMenu.menuProps!.items!.map((i) => i.id)).toEqual(['', 'low', 'high'])
     // 该条目没配 effort ⇒ 选中「默认」（selectedId 为 undefined，锚点显示「默认」）。
     expect(effortMenu.menuProps!.selectedId).toBeUndefined()
-    expect(textsOf(row)).toContain('默认')
+    expect(textsOf(editorRoot(tree)!)).toContain('默认')
 
     // 第二张卡片的第二条候选配了 high ⇒ 选中态是它。
-    const configured = rowsInCard(cardsOf(tree)[1]!)[1]!
-    expect(menusIn(configured)[2]!.menuProps!.selectedId).toBe('high')
+    // （弹窗全面板只挂一份，换目标 = 点另一行的文本按钮重开。）
+    tree = await openEditor(tree, rpcCall, 1, 1)
+    expect(editorMenus(tree)[2]!.menuProps!.selectedId).toBe('high')
   })
 
   it('无档位的模型：档位下拉禁用 + 悬停说明「该模型无思考档位」', async () => {
     const { rpcCall } = makeRpc()
-    const tree = await settle(client.AutoRoutePanel, panelProps(rpcCall), client.hooks, true)
-    // codearts/glm-5 在档位替身里回 `{}` ⇒ 无档位。
-    const row = rowsInCard(cardsOf(tree)[1]!)[1]!
-    const anchor = elementsOf(row).filter((el) => el.props['aria-haspopup'] === 'menu')[2]!
+    let tree = await settle(client.AutoRoutePanel, panelProps(rpcCall), client.hooks, true)
+    // codearts/glm-5 在档位替身里回 `{}` ⇒ 无档位；档位下拉在编辑弹窗里。
+    tree = await openEditor(tree, rpcCall, 1, 1)
+    const root = editorRoot(tree)!
+    const anchor = elementsOf(root).filter((el) => el.props['aria-haspopup'] === 'menu')[2]!
     expect(anchor.props.disabled, '无档位时档位下拉应当禁用').toBe(true)
-    const tip = elementsOf(row).find((el) => el.props['data-tooltip'] === AUTO_ROUTE_EFFORT_NONE_HELP)
+    const tip = elementsOf(root).find((el) => el.props['data-tooltip'] === AUTO_ROUTE_EFFORT_NONE_HELP)
     expect(tip, '无档位时应当给出「该模型无思考档位」说明').toBeDefined()
     expect(AUTO_ROUTE_EFFORT_NONE_HELP).toBe('该模型无思考档位')
     // 「默认」仍可选（它就是「不配 effort」），故选项不是空的。
-    expect(menusIn(row)[2]!.menuProps!.items!.map((i) => i.id)).toEqual([''])
+    expect(editorMenus(tree)[2]!.menuProps!.items!.map((i) => i.id)).toEqual([''])
   })
 
   it('档位在途时不挂「无思考档位」这个错误结论，而是「正在加载」', async () => {
@@ -987,14 +1082,15 @@ describe('AutoRoutePanel：思考档位（按需拉取 + 缓存）', () => {
     // `{ loading: true, efforts: [] }`，光看 `efforts.length === 0` 会把「还没问」
     // 判成「问过了、没有档位」—— 用户会据此以为该模型不支持思考档位而放弃配置。
     const { rpcCall } = makeRpc({ holdModelInfo: true })
-    const tree = await settle(client.AutoRoutePanel, panelProps(rpcCall), client.hooks, true)
-    const row = rowsInCard(cardsOf(tree)[0]!)[0]!
-    const anchor = elementsOf(row).filter((el) => el.props['aria-haspopup'] === 'menu')[2]!
+    let tree = await settle(client.AutoRoutePanel, panelProps(rpcCall), client.hooks, true)
+    tree = await openEditor(tree, rpcCall, 0, 0)
+    const root = editorRoot(tree)!
+    const anchor = elementsOf(root).filter((el) => el.props['aria-haspopup'] === 'menu')[2]!
     // 在途仍禁用（占位里没有可选项），但提示语必须是「加载中」。
     expect(anchor.props.disabled, '在途时档位下拉应当禁用（占位里没有可选项）').toBe(true)
-    const noneTip = elementsOf(row).find((el) => el.props['data-tooltip'] === AUTO_ROUTE_EFFORT_NONE_HELP)
+    const noneTip = elementsOf(root).find((el) => el.props['data-tooltip'] === AUTO_ROUTE_EFFORT_NONE_HELP)
     expect(noneTip, '在途时绝不能挂「该模型无思考档位」—— 那是一个错误结论').toBeUndefined()
-    const loadingTip = elementsOf(row).find((el) => el.props['data-tooltip'] === AUTO_ROUTE_EFFORT_LOADING_HELP)
+    const loadingTip = elementsOf(root).find((el) => el.props['data-tooltip'] === AUTO_ROUTE_EFFORT_LOADING_HELP)
     expect(loadingTip, '在途时应当说明「正在加载思考档位…」').toBeDefined()
     expect(AUTO_ROUTE_EFFORT_LOADING_HELP).toBe('正在加载思考档位…')
   })
@@ -1002,16 +1098,15 @@ describe('AutoRoutePanel：思考档位（按需拉取 + 缓存）', () => {
   it('选「默认」清掉 effort 键（写空串会被服务端拒）', async () => {
     const { rpcCall } = makeRpc()
     let tree = await settle(client.AutoRoutePanel, panelProps(rpcCall), client.hooks, true)
-    const row = rowsInCard(cardsOf(tree)[1]!)[1]!
-    expect(menusIn(row)[2]!.menuProps!.selectedId, '初始应当是 high').toBe('high')
+    tree = await openEditor(tree, rpcCall, 1, 1)
+    expect(editorMenus(tree)[2]!.menuProps!.selectedId, '初始应当是 high').toBe('high')
 
-    selectInMenu(menusIn(row)[2]!, '')
+    selectInMenu(editorMenus(tree)[2]!, '')
     tree = await settle(client.AutoRoutePanel, panelProps(rpcCall), client.hooks)
 
-    const after = rowsInCard(cardsOf(tree)[1]!)[1]!
     // 关键判据：`effort` **键被删掉**而不是留一个空串 —— 空串在写路径上非法。
-    expect(menusIn(after)[2]!.menuProps!.selectedId, '「默认」= 不配 effort').toBeUndefined()
-    expect(textsOf(after)).toContain('默认')
+    expect(editorMenus(tree)[2]!.menuProps!.selectedId, '「默认」= 不配 effort').toBeUndefined()
+    expect(textsOf(editorRoot(tree)!)).toContain('默认')
   })
 })
 
@@ -1079,7 +1174,9 @@ describe('AutoRoutePanel：自动保存流（修改即保存）', () => {
     // 面板**没有**变成错误页：已有的配置仍要看得到、改得动。
     expect(cardsOf(tree), '目录失败不该让配置消失').toHaveLength(2)
     // 下拉的候选集确实是空的 —— 这正是必须提示的原因。
-    expect(menusIn(rowsInCard(cardsOf(tree)[0]!)[0]!)[0]!.menuProps!.items, '目录失败时供应商下拉为空').toEqual([])
+    // 下拉在编辑弹窗里，故先点开这一条候选再看供应商下拉的 options。
+    tree = await openEditor(tree, rpcCall, 0, 0)
+    expect(editorMenus(tree)[0]!.menuProps!.items, '目录失败时供应商下拉为空').toEqual([])
 
     // 「重试」真的重拉：第二次成功 ⇒ 错误行消失、候选集回来。
     const retry = findButtonByText(tree, '重试')
@@ -1090,7 +1187,10 @@ describe('AutoRoutePanel：自动保存流（修改即保存）', () => {
 
     expect(errorLinesOf(tree).join('\n'), '重试成功后错误行应当消失').not.toContain('模型目录读取失败')
     expect(calls.filter((c) => c.method === 'autoroute.catalog').length, '重试必须真的重拉目录').toBeGreaterThan(1)
-    expect(menusIn(rowsInCard(cardsOf(tree)[0]!)[0]!)[0]!.menuProps!.items!.map((i) => i.id),
+    // 候选集回来了：同样在编辑弹窗里读供应商下拉的 options（弹窗还开着，重开一次
+    // 只是把同一目标再点一遍，保证读的是**重试之后**渲染出来的那份树）。
+    tree = await openEditor(tree, rpcCall, 0, 0)
+    expect(editorMenus(tree)[0]!.menuProps!.items!.map((i) => i.id),
       '重试成功后候选集应当回来').toEqual(['dsh', 'codearts'])
   })
 
@@ -1409,5 +1509,27 @@ describe('AccountHubPage：左侧「自动路由」选项卡', () => {
     expect(rule, '自动路由图标不得出现十六进制字面量').not.toMatch(/#[0-9a-fA-F]{3,8}\b/)
     // 反向锚点：七个 provider 的白底仍在（豁免没被顺手删掉）。
     expect(styles).toContain('.dim-ah-providerIcon.codearts { background: white; }')
+  })
+
+  /**
+   * 真机缺陷锚点：「自动模型名称编辑框右边和删除按钮重叠」。
+   *
+   * 根因不在栅格列宽，而在 `box-sizing`：`className` 由 ui-primitives 的 `Input`
+   * 透传给**外层 wrapper span**（不是内层 `<input>`），该 wrapper 自带 8px 水平
+   * 内边距 + 0.5px 描边；宿主全站又没有 border-box 重置，于是默认 content-box 下
+   * `width: 100%` 只算内容宽，wrapper 实宽 = 栅格列宽 + 17px，越过了 8px 的栅格
+   * gap 压到右邻的删除按钮上。
+   *
+   * 这条规则**少一个属性就是那个真机缺陷**，所以逐字钉住 —— 与
+   * `credits-capabilities.spec.ts` / `account-consumption-panel.spec.ts` 里
+   * 同类 `box-sizing` 锚点同构。
+   */
+  it('自动模型名称输入声明 border-box（缺它即回归真机重叠缺陷）', () => {
+    const styles = readFileSync(resolve(here, '../../plugin-src/client/account-hub-styles.js'), 'utf8')
+    const at = styles.indexOf('.dim-ah-arNameInput {')
+    expect(at, 'account-hub-styles.js 里找不到 .dim-ah-arNameInput 规则').toBeGreaterThan(-1)
+    const rule = styles.slice(at, styles.indexOf('}', at))
+    expect(rule, '名称输入必须是 border-box，否则内容盒会宽出内边距+描边并压住删除按钮').toContain('box-sizing: border-box')
+    expect(rule, '名称输入仍需可被压缩，否则会反过来挤爆卡片头').toContain('min-width: 0')
   })
 })
