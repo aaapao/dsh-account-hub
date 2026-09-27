@@ -815,6 +815,59 @@ describe('控件与样式迁移（源码级通盘闸门）', () => {
     }
   })
 
+  /**
+   * 真机缺陷锚点：「编辑弹窗里的下拉被弹窗边界截断」。
+   *
+   * 候选编辑弹窗的正文容器带 `overflow-y: auto`（见 .dim-ah-modalBody 一处），
+   * 下拉弹层若内联渲染，越出正文盒的那截会被直接裁掉、看不见也点不到。
+   * `AutoRouteSelect` 的 `Menu` 因此必须 `portal: true`：挂到 `document.body` 并改
+   * fixed 定位，彻底脱离弹窗的裁剪上下文（宿主设置页四处下拉同款写法）。
+   *
+   * ⚠️ 断言必须先切到 **AutoRouteSelect 函数体**、再去掉注释：这段函数体的 JSDoc 里
+   * 就写着「`portal: true`」这几个字，直接对整份源码 `toContain('portal: true')`
+   * 会被那段注释救活 —— 真 prop 被删掉也照样绿（本文件 `ModelListPanel` 那条同法）。
+   */
+  it('候选编辑弹窗内的下拉走 portal（内联渲染会被弹窗正文裁掉）', () => {
+    const start = clientSource.indexOf('function AutoRouteSelect(')
+    const end = clientSource.indexOf('\n/**', start + 1)
+    expect(start, '找不到 AutoRouteSelect').toBeGreaterThan(-1)
+    expect(end, '无法截取 AutoRouteSelect').toBeGreaterThan(start)
+    const body = codeOnly(clientSource.slice(start, end))
+    expect(body, '弹窗内下拉必须 portal（否则被正文的 overflow-y: auto 裁掉）')
+      .toContain('portal: true')
+  })
+
+  /**
+   * 真机功能锚点：候选编辑弹窗的「User-Agent 覆写」行（用户拍板：
+   * 每条候选一套、仅 User-Agent 一个头）。
+   *
+   * 三条判据各防一种回归：
+   * 1. UA 行存在且走 Input 原语（aria-label 'User-Agent'）—— 防整行被当装饰删掉；
+   * 2. 重置按钮存在（aria-label '重置 User-Agent'）且**未覆写时禁用**
+   *    （userAgent === ''）：值已经是默认，点了没反应的按钮必须不可点；
+   * 3. 占位文案链路：默认值显示来自 `autoroute.model-info` 的
+   *    `defaultUserAgent`（非本插件 provider 字段缺席时显示
+   *    AUTO_ROUTE_UA_UNKNOWN_PLACEHOLDER，不编造框架 UA）。
+   */
+  it('候选编辑弹窗有 User-Agent 覆写行：Input + 重置按钮（未覆写时禁用）+ 默认值占位', () => {
+    expect(clientCode).toContain("'aria-label': 'User-Agent'")
+    expect(clientCode).toContain("'aria-label': '重置 User-Agent'")
+    expect(clientCode).toContain('AUTO_ROUTE_UA_UNKNOWN_PLACEHOLDER')
+    // 占位值链路：uaPlaceholder 只能取自 defaultUserAgent 或占位常量 —— 防止
+    // 有人把 placeholder 写死成某个具体 UA 字面量（宿主升级后即静默过期）。
+    const at = clientCode.indexOf('const uaPlaceholder =')
+    expect(at, '找不到 uaPlaceholder 的定义').toBeGreaterThan(-1)
+    const line = codeOnly(clientCode.slice(at, clientCode.indexOf(';', at)))
+    expect(line, '占位值必须来自 model-info 的 defaultUserAgent，不得写字面量')
+      .toContain('defaultUserAgent')
+    // 重置 = 清键回默认（undefined），不是把输入框填成默认值 —— 那会让
+    // 「编辑过的」与「从未编辑」不可区分（默认值一变，前者不跟着变）。
+    const resetAt = clientCode.indexOf("'aria-label': '重置 User-Agent'")
+    const resetBody = clientCode.slice(resetAt, clientCode.indexOf('⟲', resetAt))
+    expect(resetBody, '重置按钮必须把 userAgent 置空（清覆写键），而不是写入默认值')
+      .toContain("onSelectField('userAgent', '')")
+  })
+
   it('按钮与拖拽手柄 Tooltip 按清单精简，其余提示保留', () => {
     expect(clientCode).toContain("'aria-label': '模型列表'")
     expect(clientCode).toContain("'aria-label': '刷新积分'")

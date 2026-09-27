@@ -34,6 +34,7 @@ import { LlmAdapter, LlmError, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type {
   GenerateOptions, LlmModelInfo, LlmProviderInfo, LlmResolvedModelInfo, StreamChunk,
 } from '@deepseek-ai/dsh-llm'
+import { applyAccountHubUserAgent } from './account-hub-user-agent.js'
 import { AccountPool, providerCatalogVisible } from './account-pool.js'
 import type { LlmSettingsAddress } from './types.js'
 import { isTraeCnExpired } from './trae-cn-oauth.js'
@@ -971,6 +972,12 @@ export class TraeCnAdapter extends LlmAdapter {
     // 注意：这里不用 `new Headers(...)` —— Headers 构造器会丢弃/规范化部分头，
     // 普通对象逐字传递（与 credits 模块一致），避免两处请求头形态不一致。
     const headers = traeCnSoloHeaders(credential, 'text/event-stream')
+    // Account Hub 覆写通道：自动路由的候选条目配了 `userAgent` 时，整体换掉
+    // `traeCnSoloHeaders` 里的 `Trae/0.1.61`（没配则本行什么都不做，出站头逐字节
+    // 不变）。本对象是**普通对象**而非 `Headers`：helper 会先清掉异形键
+    // （`user-agent` 之类）再写 `User-Agent`，避免同一次请求出现两个 UA 头。
+    // 载荷与判据的唯一来源是 `src/account-hub-user-agent.ts`。
+    applyAccountHubUserAgent(headers, options)
     try {
       // **SOLO 通道**（`/api/agent/v3/llm_utils_chat`）打在 IDE 网关上，
       // 而不是 `product.apiBase`（见 TRAE_CN_CHAT_PATH 的迁移说明）。

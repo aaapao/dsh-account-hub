@@ -29,6 +29,7 @@ import {
 } from '@deepseek-ai/dsh-llm'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, LlmModelInfo, LlmProviderInfo, LlmResolvedModelInfo, StreamChunk } from '@deepseek-ai/dsh-llm'
+import { applyAccountHubUserAgent } from './account-hub-user-agent.js'
 import { AccountPool, providerCatalogVisible } from './account-pool.js'
 import { parseRateLimitError } from './llm-adapter.js'
 import {
@@ -1098,6 +1099,10 @@ export class LobsteraiAdapter extends LlmAdapter {
   ): Promise<Response> {
     const clientVersion = await this.clientVersion()
     const headers = new Headers(lobsteraiChatHeaders(credential, this.product, clientVersion))
+    // Account Hub 覆写通道：自动路由的候选条目配了 `userAgent` 时，整体换掉
+    // `lobsteraiChatHeaders` 里的产品 UA（没配则本行什么都不做，出站头零变化）。
+    // 载荷与判据的唯一来源是 `src/account-hub-user-agent.ts`。
+    applyAccountHubUserAgent(headers, options)
     try {
       return await this.fetchImpl(`${this.product.apiBase}${LOBSTERAI_CHAT_PATH}`, {
         method: 'POST',

@@ -387,18 +387,25 @@ const STYLES = `
 .dim-ah-arEntryRow[data-dropBefore="true"]::before { content: ''; position: absolute; left: 0; right: 0; top: -4px; height: 2px; border-radius: 2px; background: var(--dsw-alias-brand-primary); }
 .dim-ah-arEntryRow[data-dropAfter="true"]::after { content: ''; position: absolute; left: 0; right: 0; bottom: -4px; height: 2px; border-radius: 2px; background: var(--dsw-alias-brand-primary); }
 /* 行上的候选描述：一枚无边框文本按钮，点开候选编辑弹窗（三个下拉在里面）。
-   外观全部清掉（无边框 / 无背景 / 继承字号），只留 hover 的交互底色 ——
+   外观基本清掉（无边框 / 无背景 / 字体族仍走继承），只留 hover 的交互底色 ——
    取值照同包 Button.module.css 的 ghost 外观，与 .dim-ah-selectAnchor 的 hover
    是同一条 token。overflow + ellipsis 是必须的：模型名动辄几十字符，栅格列宽
-   由 minmax(0, 1fr) 定死，不裁就会画到删除按钮上。 */
-.dim-ah-arEntryText { box-sizing: border-box; min-width: 0; max-width: 100%; padding: 4px 8px; border: none; border-radius: 6px; background: transparent; font: inherit; color: var(--dsw-alias-label-primary); text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+   由 minmax(0, 1fr) 定死，不裁就会画到删除按钮上。
+   ⚠️ 字号**不**继承：面板正文档是 14px，用户真机反馈候选行偏大，故降到 13px 一档
+   （--dsw-font-xs-13-*，正是 s-14 之下、xxs-12 之上的那一级）。
+   font: inherit 必须保留 —— button 元素默认**不**继承字体，删掉它按钮会掉回
+   浏览器默认字体族；故写法是「先整体 inherit，再用 font-size / line-height 两个
+   长写各覆盖一档」，与 .dim-ah-arOrder 的令牌对写法同源、顺序也不能颠倒。
+   ⚠️ 本文件整体是一段模板字面量，注释里**不得出现反引号**（会截断字符串）。 */
+.dim-ah-arEntryText { box-sizing: border-box; min-width: 0; max-width: 100%; padding: 4px 8px; border: none; border-radius: 6px; background: transparent; font: inherit; font-size: var(--dsw-font-xs-13-font-size); line-height: var(--dsw-font-xs-13-line-height); color: var(--dsw-alias-label-primary); text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
 .dim-ah-arEntryText:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover); }
 .dim-ah-arEntryText:disabled { cursor: not-allowed; opacity: 0.4; }
 /* 还没选全时那行字是**引导语**（「选择供应商」/「选择模型」）而不是配置值，
    退到三级灰，与已配好的「模型(档位)-供应商」区分开。 */
 .dim-ah-arEntryText[data-placeholder="true"] { color: var(--dsw-alias-label-tertiary); }
 
-/* 候选编辑弹窗正文：三行「标签 + 下拉」，标签列按文案自适应、下拉吃满剩余。 */
+/* 候选编辑弹窗正文：三行「标签 + 下拉」加一行 User-Agent 覆写，
+   标签列按文案自适应、控件吃满剩余。 */
 .dim-ah-arEditor { display: grid; gap: 12px; }
 .dim-ah-arEditorRow { display: grid; grid-template-columns: max-content minmax(0, 1fr); align-items: center; gap: 12px; }
 .dim-ah-arEditorLabel { font-size: var(--dsw-font-xxs-12-font-size); line-height: var(--dsw-font-xxs-12-line-height); color: var(--dsw-alias-label-secondary); }
@@ -408,6 +415,16 @@ const STYLES = `
    ⚠️ 与 .dim-ah-consumptionGroup 那条同因：后代规则必须排在
    .dim-ah-selectAnchor 基础规则之后（见该处的说明）。 */
 .dim-ah-arEditorRow .dim-ah-selectAnchor { box-sizing: border-box; width: 100%; min-width: 0; max-width: 100%; justify-content: space-between; overflow: hidden; white-space: nowrap; }
+
+/* User-Agent 覆写行：label + 输入框 + 重置按钮排成一条 flex 行，与上面三行共用
+   同一条 12px 节奏。label 复用 .dim-ah-arEditorLabel（同一档字号与色阶）。
+   ⚠️ 这一行是**高级配置**，不进候选行摘要文本（见 .dim-ah-arEntryText）。 */
+.dim-ah-arEditorUaRow { display: flex; align-items: center; gap: 12px; }
+/* 输入框的 className 落在 ui-primitives 那个 wrapper span 上（同 .dim-ah-arNameInput）。
+   那一层自带 8px 水平内边距 + 0.5px 描边，而宿主全站没有通盘 box-sizing 重置：
+   不显式声明 border-box，flex 项的内容盒就会宽出 17px，把右邻的重置按钮挤出弹窗。
+   min-width: 0 保证超长 UA 文本被裁在输入框里，而不是把整行顶开。 */
+.dim-ah-arEditorUaInput { box-sizing: border-box; flex: 1 1 auto; width: 100%; min-width: 0; }
 
 /* 「添加模型」入口所在行。 */
 .dim-ah-arAddEntry { display: flex; align-items: center; gap: 8px; }

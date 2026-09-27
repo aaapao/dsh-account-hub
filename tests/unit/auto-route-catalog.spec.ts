@@ -326,22 +326,43 @@ describe('autoroute.model-info：单模型档位（尽力而为）', () => {
     expect(result.value).toEqual({ efforts: ['low', 'high'], defaultEffort: 'high' })
   })
 
-  it('无 reasoning（如 codearts 全系）→ {}，而不是报错', async () => {
+  it('无 reasoning（如 codearts 全系）→ 只带 defaultUserAgent，而不是报错', async () => {
     const h = await setup({
       resolveModelInfo: async () => ({ provider: 'codearts', id: 'm-1', name: '模型一' }),
     })
     const result = await h.call('autoroute.model-info', { provider: 'codearts', model: 'm-1' })
     expect(result.ok).toBe(true)
+    // UA 覆写（用户拍板「每候选仅 User-Agent」）的「默认值」栏就来自这个字段：
+    // codearts 的 UA 即框架归属头（userAgent()），这里只断言**在场**且是字符串，
+    // 不逐字锁值 —— 框架版本随宿主升级，锁字面量会让本用例在宿主发版时红。
+    expect(typeof result.value.defaultUserAgent).toBe('string')
+    expect(result.value.defaultUserAgent.length).toBeGreaterThan(0)
+    expect(Object.keys(result.value).sort()).toEqual(['defaultUserAgent'])
+  })
+
+  it('非本插件的 provider → defaultUserAgent 缺席（不编造框架 UA）', async () => {
+    const h = await setup({
+      resolveModelInfo: async () => ({ provider: 'p-a', id: 'm-1', name: '模型一' }),
+    })
+    const result = await h.call('autoroute.model-info', { provider: 'p-a', model: 'm-1' })
+    expect(result.ok).toBe(true)
+    // 判不出的 provider 看不到它的 send()，返回 undefined 字段缺席 —— 与
+    // defaultEffort 同一条「不编造」判据：编一个值会让编辑器把「不知道」
+    // 显示成「当前值就是它」。
     expect(result.value).toEqual({})
   })
 
-  it('resolveModelInfo 抛错 → {}（编辑器据此显示「无档位可选」而非「加载失败」）', async () => {
+  it('resolveModelInfo 抛错 → defaultUserAgent 仍在（档位读不到但 UA 是确定值）', async () => {
     const h = await setup({
       resolveModelInfo: async () => { throw new Error('未知模型') },
     })
-    const result = await h.call('autoroute.model-info', { provider: 'p-a', model: 'nope' })
+    const result = await h.call('autoroute.model-info', { provider: 'codearts', model: 'nope' })
     expect(result.ok).toBe(true)
-    expect(result.value).toEqual({})
+    // UA 现算纯函数在 try 之外，档位路径抛错不影响它 —— 用 codearts 才有确定值
+    // （p-a 是假 provider，UA 缺席，那条路径已由上一条用例覆盖）。
+    expect(typeof result.value.defaultUserAgent).toBe('string')
+    expect(result.value.defaultUserAgent.length).toBeGreaterThan(0)
+    expect(Object.keys(result.value).sort()).toEqual(['defaultUserAgent'])
   })
 
   it('provider = auto-route 自身 → {} 且**不查适配器**（防递归查询）', async () => {

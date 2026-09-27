@@ -2306,6 +2306,16 @@ const AUTO_ROUTE_DEFAULT_EFFORT = '';
 /** 「默认」档在界面上的文案。 */
 const AUTO_ROUTE_DEFAULT_EFFORT_LABEL = '默认';
 
+/**
+ * User-Agent 覆写行在「判不出默认 UA」时的占位文案。
+ *
+ * `autoroute.model-info` 的 `defaultUserAgent` 缺席 = 服务端判不出该 provider
+ * 真实发出的 UA（例如 qoder 系走 wasm 签名链，服务端已知该路径不生效），此时
+ * **不猜**一个值：与档位行的「该模型无思考档位」同一条原则 —— 宁可明说「不知道」，
+ * 也不给用户一个与真相相反的结论。
+ */
+const AUTO_ROUTE_UA_UNKNOWN_PLACEHOLDER = '该供应商无已知默认 UA';
+
 /** 自动模型定义 id 的自增种子（与时间戳一起保证同一次会话内不重复）。 */
 let autoRouteIdSeed = 0;
 
@@ -2378,6 +2388,16 @@ function AutoRouteSelect({ label, options, value, busy, disabled, fallback, tool
     onSelect: (id) => { setOpen(false); onSelect(id); },
     onClose: () => setOpen(false),
     align: 'start',
+    /**
+     * ⚠️ **必须 portal**：候选编辑弹窗的正文容器带 `overflow-y: auto`，内联渲染的
+     * 弹层一旦越出正文盒就被裁掉（用户真机反馈：「下拉菜单被弹窗边界截断」）。
+     * `portal: true` 让 `Menu` 把列表挂到 `document.body` 并改用 fixed 定位
+     * （`Menu.module.css` 的 `.portal` 以 z-index 1100 压在弹窗遮罩的 1000 之上，
+     * 正是为「弹窗内的锚点」准备的），从而彻底脱离弹窗的裁剪上下文。
+     * 宿主设置页四处下拉全是这个写法（见 PreferenceRow 的 `portal`）。
+     * `align: 'start'` 保留：portal 下对齐由定位数学读同一个 prop 决定，两者不冲突。
+     */
+    portal: true,
   }), tooltip);
 }
 
@@ -2464,10 +2484,22 @@ function AutoRouteEntryRow({
 }
 
 /**
- * 候选编辑弹窗：供应商 / 模型 / 思考程度各占一行，下拉仍复用 AutoRouteSelect。
+ * 候选编辑弹窗：供应商 / 模型 / 思考程度三行下拉，下面再挂一行 User-Agent 覆写。
+ * 下拉复用 AutoRouteSelect，UA 行用 ui-primitives 的 Input 加一枚重置按钮。
  *
  * 弹窗只负责挂载控件；草稿唯一所有者仍是 AutoRoutePanel，选中动作直接回调面板的
  * onSelectField，因此级联清空、修改即保存、默认档哨兵值都沿用原有写路径。
+ *
+ * ## User-Agent 行（高级配置）
+ *
+ * 每条候选可覆写**仅 User-Agent 一个头**：值非空 = 该候选发出的请求带这个 UA，
+ * 值为空 = 用默认（服务端按 provider 注入它自己那份）。placeholder 是**只读提示**，
+ * 显示该 provider+model 当前真实发出的 UA（来自 `autoroute.model-info` 的
+ * `defaultUserAgent`），故用户在下手之前就知道「不改的话会是什么」。
+ *
+ * ⚠️ UA **不进候选行摘要**（`.dim-ah-arEntryText`）：行文本回答的是「这条候选长
+ * 什么样」（模型(档位)-供应商）。UA 是少数人才动的伪装项，混进摘要会把每行都撑长，
+ * 而它对「这条候选会走哪个模型」没有半点信息量。
  */
 function AutoRouteEntryEditor({ entry, index, catalog, effortInfo, busy, onSelectField, onClose }) {
   const providerGroup = catalog.find(group => group.id === entry.provider);
@@ -2489,6 +2521,22 @@ function AutoRouteEntryEditor({ entry, index, catalog, effortInfo, busy, onSelec
     : effortLoading
       ? AUTO_ROUTE_EFFORT_LOADING_HELP
       : (entry.model ? undefined : AUTO_ROUTE_MODEL_FIRST_HELP);
+  /**
+   * UA 行的取值与占位。
+   *
+   * - 非空串 = **已覆写**（重置按钮可点，点了把键摘掉即回默认）；
+   * - 空串 / 缺省 = 用默认（无可重置，按钮禁用）；
+   * - placeholder 显示该 provider+model **真实发出的** UA（model-info 的
+   *   `defaultUserAgent`）；字段缺席 = 服务端判不出，明说「无已知默认 UA」。
+   *
+   * ⚠️ placeholder 是**只读提示**而不是值：把它当值会让「没覆写」与「覆写成
+   * 恰好等于默认值」在界面上无法区分，而两者在服务端的处置不同（前者不注入）。
+   */
+  const userAgent = typeof entry.userAgent === 'string' ? entry.userAgent : '';
+  const defaultUserAgent = effortInfo && typeof effortInfo.defaultUserAgent === 'string'
+    ? effortInfo.defaultUserAgent
+    : '';
+  const uaPlaceholder = defaultUserAgent !== '' ? defaultUserAgent : AUTO_ROUTE_UA_UNKNOWN_PLACEHOLDER;
   const fieldRow = (label, select) => React.createElement('div', { className: 'dim-ah-arEditorRow' },
     React.createElement('span', { className: 'dim-ah-arEditorLabel' }, label),
     select);
@@ -2528,7 +2576,30 @@ function AutoRouteEntryEditor({ entry, index, catalog, effortInfo, busy, onSelec
         fallback: AUTO_ROUTE_DEFAULT_EFFORT_LABEL,
         tooltip: effortTooltip,
         onSelect: (id) => onSelectField('effort', id),
-      }))));
+      })),
+      // 第四行：User-Agent 覆写（label + 单行输入 + 重置按钮，布局见 .dim-ah-arEditorUaRow）。
+      React.createElement('div', { className: 'dim-ah-arEditorUaRow' },
+        React.createElement('span', { className: 'dim-ah-arEditorLabel' }, 'User-Agent'),
+        React.createElement(Input, {
+          className: 'dim-ah-arEditorUaInput',
+          value: userAgent,
+          disabled: busy,
+          // 可读名走 aria-label：placeholder 是给眼睛看的默认值，不能拿它当名称
+          // （它随 provider 变化，读屏用户听到的会是「一个 UA 字符串」而不是字段名）。
+          'aria-label': 'User-Agent',
+          placeholder: uaPlaceholder,
+          // 空串 = 回默认（setEntryField 把键摘掉），故「清空输入框」与「点重置」同义。
+          onChange: (event) => onSelectField('userAgent', event?.target?.value ?? ''),
+        }),
+        React.createElement(Button, {
+          variant: 'ghost',
+          size: 'sm',
+          className: 'dim-ah-iconBtn',
+          'aria-label': '重置 User-Agent',
+          // 未覆写时无处可重置（值已经是默认）：禁用，而不是点了没反应。
+          disabled: busy || userAgent === '',
+          onClick: () => onSelectField('userAgent', ''),
+        }, '⟲'))));
 }
 
 /**
@@ -2574,7 +2645,8 @@ function AutoRoutePanel({ rpcCall }) {
   // 目录拉取失败的原因（红色提示行 + 「重试」按钮）。目录是编辑器三个下拉的候选集，
   // 拉不到时下拉全空 —— 静默失败会让用户以为「这个插件没有任何模型可选」。
   const [catalogError, setCatalogError] = React.useState(null);
-  // 档位缓存：`provider\0model` → `{ loading, efforts, defaultEffort? }`。
+  // model-info 缓存：`provider\0model` → `{ loading, efforts, defaultEffort?, defaultUserAgent? }`。
+  // 名字仍叫 efforts（主用途是档位），但缓存项是**整份响应** —— 编辑弹窗的 UA 行也读它。
   const [efforts, setEfforts] = React.useState({});
   // 待确认删除的定义 id（`Modal` 二键确认，取代原生 confirm）。
   const [pendingDelete, setPendingDelete] = React.useState(null);
@@ -2646,11 +2718,16 @@ function AutoRoutePanel({ rpcCall }) {
   }, [rpcCall]);
 
   /**
-   * 按需拉一个模型的档位（**同 provider+model 只拉一次**，见 effortsRef）。
+   * 按需拉一个模型的档位与默认 UA（**同 provider+model 只拉一次**，见 effortsRef）。
    *
    * 宿主对无档位 / 未知模型 / 适配器抛错一律回 `{}`（那是**正常结果**，不是错误），
    * 故这里把「回空」当成「无档位」缓存下来，与真失败同一处置：都不重试，
    * 避免同一 key 在一次面板停留里反复打请求。
+   *
+   * ⚠️ 缓存项是 **`autoroute.model-info` 的整份响应**（`efforts` / `defaultEffort` /
+   * `defaultUserAgent`），不只是档位：候选编辑弹窗的 User-Agent 行要拿
+   * `defaultUserAgent` 当 placeholder。UA 行**不另发一路请求** —— 同一个
+   * provider+model 问两次，除了多打一次 RPC 什么也换不来。
    */
   const requestEfforts = React.useCallback((provider, model) => {
     if (typeof provider !== 'string' || provider.length === 0) return;
@@ -2664,6 +2741,11 @@ function AutoRoutePanel({ rpcCall }) {
       const info = { loading: false, efforts: Array.isArray(res?.efforts) ? res.efforts : [] };
       // `defaultEffort` 缺席 = 用 provider 自己的默认档，**不补一个猜测值**。
       if (typeof res?.defaultEffort === 'string') info.defaultEffort = res.defaultEffort;
+      // `defaultUserAgent` 同款：字段缺席（或空串）＝ 服务端判不出该 provider 真实发出
+      // 的 UA，UA 行的 placeholder 据此显示「无已知默认 UA」而不是一个猜测值。
+      if (typeof res?.defaultUserAgent === 'string' && res.defaultUserAgent !== '') {
+        info.defaultUserAgent = res.defaultUserAgent;
+      }
       effortsRef.current[key] = info;
       setEfforts({ ...effortsRef.current });
     }).catch((caught) => {
@@ -2787,7 +2869,14 @@ function AutoRoutePanel({ rpcCall }) {
       : def)));
   };
 
-  /** 改一条候选的某一级：换供应商/模型都要清掉下游取值（旧值属于上一级）。 */
+  /**
+   * 改一条候选的某一级：换供应商/模型都要清掉下游取值（旧值属于上一级）。
+   *
+   * ⚠️ 供应商 / 模型这两级是**上游**，改它们顺带清下游是刻意的（旧的 model / effort
+   * 属于上一个供应商，留着就是非法配置）。而 `effort` 与 `userAgent` 是**同级**的
+   * 两个可选字段：改一个绝不能把另一个冲掉 —— 这正是下面两处走「展开再摘键」而不是
+   * 「按已知字段重建对象」的原因（重建一次就会静默抹掉另一个）。
+   */
   const setEntryField = (defId, index, field, value) => {
     editDraft(prev => prev.map(def => {
       if (def.id !== defId) return def;
@@ -2797,10 +2886,20 @@ function AutoRoutePanel({ rpcCall }) {
           if (i !== index) return entry;
           if (field === 'provider') return { provider: value, model: '' };
           if (field === 'model') return { provider: entry.provider, model: value };
-          // 「默认」= 删掉 effort 键（空串写进去是非法的）。
-          return value === AUTO_ROUTE_DEFAULT_EFFORT
-            ? { provider: entry.provider, model: entry.model }
-            : { provider: entry.provider, model: entry.model, effort: value };
+          if (field === 'userAgent') {
+            // 空值 = 回默认：把键**摘掉**（服务端只收非空串，写空串会被拒）。
+            if (value !== '') return { ...entry, userAgent: value };
+            const withoutUa = { ...entry };
+            delete withoutUa.userAgent;
+            return withoutUa;
+          }
+          // 「默认」= 删掉 effort 键（空串写进去是非法的）；userAgent 不跟着走。
+          if (value === AUTO_ROUTE_DEFAULT_EFFORT) {
+            const withoutEffort = { ...entry };
+            delete withoutEffort.effort;
+            return withoutEffort;
+          }
+          return { ...entry, effort: value };
         }),
       };
     }));

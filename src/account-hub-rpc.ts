@@ -86,6 +86,9 @@ import {
 // 本导入不构成循环：`llm-adapter` 不 import 本模块（也不 import 任何 import 本模块
 // 的文件），且本文件已经间接依赖它（`account-probe` → `llm-adapter`）。
 import { PROVIDER as CODEARTS_PROVIDER } from './llm-adapter.js'
+// 面板 UA 输入框「默认值」的取值来源：**现算**（逐个 provider 引用真实出处，
+// 不抄常量表 —— 抄一份就会在产品配置或模型族规则变化时与实际出站头脱节）。
+import { providerDefaultUserAgent } from './provider-default-user-agent.js'
 import type { CodeArtsCredential, ProviderId } from './types.js'
 import type {
   ProviderAccountEntry,
@@ -3197,28 +3200,42 @@ function registerAccountHubEndpoints(options: AccountHubRpcOptions): void {
         if (req.provider === AUTO_ROUTE_PROVIDER_ID) {
           return { ok: true, value: {} satisfies RpcAutoRouteModelInfoResponse }
         }
+        // 默认 UA 与档位是**两条独立的数据源**，故各自算各自的：
+        // - UA 是纯函数（`provider` + `model` 现算，不查适配器、不触网，见
+        //   `src/provider-default-user-agent.ts`），因此**在 try 之外先算好**；
+        // - 档位要问适配器（`resolveModelInfo`），可能抛错、可能没有。
+        // 于是 UA 出现在**每一条**返回路径上：没有档位的模型（CodeArts 全系）
+        // 恰恰最需要面板显示「默认 UA 是什么」。
+        // 判不出（非本插件 provider）= 字段缺席，**不补猜测值** —— 与
+        // `defaultEffort` 同一条判据：编造一个 UA 会让编辑器把「不知道」显示成
+        // 「当前值就是它」，用户据此覆写等于按假信息做决定。
+        const defaultUserAgent = providerDefaultUserAgent(req.provider, req.model)
+        const uaField: RpcAutoRouteModelInfoResponse =
+          defaultUserAgent === undefined ? {} : { defaultUserAgent }
         const llm = llmServiceOf(ctx)
         if (llm === undefined) {
-          return { ok: true, value: {} satisfies RpcAutoRouteModelInfoResponse }
+          return { ok: true, value: uaField }
         }
         try {
           const info = await llm.resolveModelInfo(req.provider, req.model)
           const reasoning = info?.reasoning
           if (reasoning === undefined || reasoning.efforts.length === 0) {
-            return { ok: true, value: {} satisfies RpcAutoRouteModelInfoResponse }
+            return { ok: true, value: uaField }
           }
           const value: RpcAutoRouteModelInfoResponse = {
             efforts: reasoning.efforts.map((effort) => effort.id),
             // `defaultEffort` 缺席 = 用 provider 自己的默认档，**不补一个猜测值**：
             // 编造默认档会让编辑器把「没配」显示成「配了某一档」。
             ...reasoning.defaultEffort === undefined ? {} : { defaultEffort: reasoning.defaultEffort },
+            ...uaField,
           }
           return { ok: true, value }
         } catch (error) {
           ctx.logger?.warn?.(
             `[account-hub] 读取 ${req.provider}/${req.model} 的档位失败（编辑器显示为无档位可选）：${String(error)}`,
           )
-          return { ok: true, value: {} satisfies RpcAutoRouteModelInfoResponse }
+          // 档位读不到但 UA 照样是确定值：这条路径同样带上它。
+          return { ok: true, value: uaField }
         }
       }
 

@@ -652,8 +652,8 @@ export interface RpcAutoRouteModelInfoRequest {
 /**
  * RPC: `autoroute.model-info` 响应。
  *
- * 两个字段都可选且**可以同时缺席**：该模型没有档位（如 CodeArts 全系没有
- * `reasoning` 元数据）时返回 `{}` —— 这是**正常结果**而不是错误，编辑器据此
+ * 三个字段都可选且**可以同时缺席**：该模型没有档位（如 CodeArts 全系没有
+ * `reasoning` 元数据）时档位两键缺席 —— 这是**正常结果**而不是错误，编辑器据此
  * 显示「该模型无档位可选」。
  */
 export interface RpcAutoRouteModelInfoResponse {
@@ -661,6 +661,20 @@ export interface RpcAutoRouteModelInfoResponse {
   efforts?: string[]
   /** 适配器配置的默认档；缺席 = 用 provider 自己的默认。 */
   defaultEffort?: string
+  /**
+   * 该 `{provider, model}` **当前会发出的 User-Agent**（编辑器把它显示成 UA 输入框的
+   * 「默认值」占位，用户据此决定要不要覆写）。
+   *
+   * 缺席 = **判不出**（该 provider 不在本插件名下，其适配器由别的插件注册、UA 只有它
+   * 自己知道）—— 与 `defaultEffort` 同一判据：**不补一个猜测值**。编造一个 UA 会让
+   * 编辑器把「无法判定」显示成「当前值就是它」，用户据此覆写等于按假信息做决定。
+   *
+   * ⚠️ 本字段是**现算的展示值**，不参与任何出站决策：真正生效的默认 UA 始终是适配器
+   * 自己那份（本字段与它同源，见 `src/provider-default-user-agent.ts`）。
+   * `qoder-cn` 是已知的反例：它的 chat 走 wasm 签名链、出站头由 wasm 生成，本字段回
+   * TS 层的产品常量（`qoder/1.1.58`），**实际出站以 wasm 为准**。
+   */
+  defaultUserAgent?: string
 }
 
 /** 存储在 CODEARTS_ACCESS_TOKEN 下的归一化临时凭据。 */

@@ -17,6 +17,7 @@ import {
   LlmAdapter, LlmError,
   ReasoningEffortId,
 } from '@deepseek-ai/dsh-llm'
+import { applyAccountHubUserAgent } from './account-hub-user-agent.js'
 import { AccountPool, providerCatalogVisible } from './account-pool.js'
 import { availableContextTiers, effectiveContextWindow, type ContextTier } from './context-tiers.js'
 import { isQuotaExhausted, isRateLimited, parseQuotaExhausted, parseRateLimitError } from './llm-adapter.js'
@@ -1213,6 +1214,11 @@ export class BuddyAdapter extends LlmAdapter {
     // 必须用 set 覆盖（attributionHeaders() 注入的框架 UA 键为小写，
     // 但 Headers 键大小写不敏感，set 能正常覆盖）。
     headers.set('User-Agent', resolveUserAgent(this.product, options.model))
+    // Account Hub 覆写通道：自动路由的候选条目配了 `userAgent` 时，整体换掉上面
+    // 按模型族算出/产品配置里的默认 UA（没配则本行什么都不做，出站头逐字节不变）。
+    // 覆写只对**这一条候选**生效，`resolveUserAgent` 的默认值仍是所有非覆写请求
+    // 的唯一来源 —— 通道的载荷与判据都在 `src/account-hub-user-agent.ts`。
+    applyAccountHubUserAgent(headers, options)
     try {
       return await this.fetchImpl(`${this.product.endpoint}/v2/chat/completions`, {
         method: 'POST',

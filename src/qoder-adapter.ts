@@ -60,6 +60,7 @@ import { LlmAdapter, LlmError, ReasoningEffortId, ToolCallId } from '@deepseek-a
 import type {
   GenerateOptions, LlmModelInfo, LlmProviderInfo, LlmResolvedModelInfo, StreamChunk, TokenUsage,
 } from '@deepseek-ai/dsh-llm'
+import { accountHubUserAgentOf, applyAccountHubUserAgent } from './account-hub-user-agent.js'
 import { AccountPool, providerCatalogVisible } from './account-pool.js'
 import { availableContextTiers, effectiveContextWindow, type ContextTier } from './context-tiers.js'
 import type { LlmSettingsAddress } from './types.js'
@@ -2188,6 +2189,13 @@ export class QoderAdapter extends LlmAdapter {
 
     const headers: Record<string, string> = {}
     for (const [key, value] of prepared.headers) headers[key] = value
+    // ⚠️ **Account Hub 覆写通道在 CN 不可达**：这里的头由 wasm 签名器**整包**给出
+    // （连 `Authorization` 都是它签的 `Bearer COSY.…`），TS 层改任何一个头都可能让
+    // 头与签名口径不一致。故**不覆写**，只在用户真的配了 UA 时提醒一句 ——
+    // **不阻断请求**：静默忽略会让用户以为覆写生效了（面板上那个值明明配着）。
+    if (accountHubUserAgentOf(options) !== undefined) {
+      console.warn('qoder-cn 走 wasm 签名链，UA 覆写暂不生效')
+    }
     try {
       return await this.fetchImpl(prepared.url, {
         method: 'POST',
@@ -2256,6 +2264,13 @@ export class QoderAdapter extends LlmAdapter {
       headers['Cosy-ClientType'] = qoderClientType(this.product)
       headers['Cosy-Version'] = this.product.cosyVersion
     }
+    // Account Hub 覆写通道：自动路由的候选条目配了 `userAgent` 时，整体换掉
+    // `qoderJobTokenHeaders` 里的产品 UA（没配则本行什么都不做，出站头零变化）。
+    // 放在所有头都设完之后 —— 覆写是这条请求头的**最终**取值。
+    //
+    // ⚠️ **本行只覆盖国际版**：CN 的 chat 一律走 wasm 签名路径（见
+    // {@link QoderAdapter.sign} 的告警），压根到不了这里。
+    applyAccountHubUserAgent(headers, options)
     // chat 主机：**每次请求时**读 `QODER_MODEL_SERVER_HOST`（逃生阀语义 = 运行时可切，
     // 故不能在构造时缓存）。只覆盖 chat，openapi / models 两条控制面不受影响。
     const chatBase = resolveQoderChatBase(this.product.chatBase)

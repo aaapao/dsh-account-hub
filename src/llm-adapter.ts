@@ -7,6 +7,7 @@ import {
 import type { GenerateOptions, LlmModelInfo, LlmProviderInfo, LlmResolvedModelInfo, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import { AccountPool, providerCatalogVisible } from './account-pool.js'
+import { applyAccountHubUserAgent } from './account-hub-user-agent.js'
 import type { RemoteModel } from './models.js'
 import { isCodeArtsBenefitModel } from './models.js'
 import { signRequestHuawei } from './sign.js'
@@ -1096,6 +1097,16 @@ export class CodeArtsAdapter extends LlmAdapter {
       headers.set('Chat-Id', this.chatId)
       headers.set('Session-Id', this.sessionId)
       headers.set('lang', 'en')
+
+      // Account Hub 覆写通道：自动路由的候选条目配了 `userAgent` 时，整体换掉
+      // `attributionHeaders()` 注入的框架 UA（没配则本行什么都不做，出站头零变化）。
+      //
+      // ⚠️ **顺序与签名无关**：CodeArts 的 SDK-HMAC-SHA256 只覆盖
+      // `host` / `x-sdk-date` / `x-sdk-content-sha256` / `x-security-token` /
+      // `extraHeaders`（如 `maas_type`）/ `content-type`（见 `src/sign.ts` 的
+      // `signRequestHuawei`），`user-agent` **不在 SignedHeaders 里** —— 故这里
+      // 放在签名之后覆写，与服务端验签结果无关，不需要挪到 `signRequestHuawei` 之前。
+      applyAccountHubUserAgent(headers, options)
 
       response = await this.fetchImpl(url, {
         method: 'POST',

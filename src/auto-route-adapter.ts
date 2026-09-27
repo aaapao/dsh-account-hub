@@ -38,6 +38,9 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import { EMPTY_RESPONSE_CODE, LlmAdapter, LlmError, ReasoningEffortId, resolveRetryPolicy } from '@deepseek-ai/dsh-llm'
+// 只取类型：UA 覆写通道的形状（字段本体由 forwardOptions 写入、由内层适配器读取，
+// 见 `src/account-hub-user-agent.ts`）。import type 不进运行时依赖。
+import type { AccountHubUserAgentCarrier } from './account-hub-user-agent.js'
 import type {
   AdapterRegistrationHandle,
   GenerateOptions,
@@ -381,6 +384,11 @@ export class AutoRouteAdapter extends LlmAdapter {
  * - `messages`：必须走 {@link rewriteMessagesForTarget}（replayState 归属检查，
  *   见那里的说明）。请求对象与其 `messages` 都是**深冻结**的，故这里 `map` 出新
  *   数组、浅拷贝出新对象，绝不原地改。
+ * - `accountHubUserAgent`：条目配了 `userAgent` 就挂上**本插件的内部通道字段**
+ *   （{@link AccountHubUserAgentCarrier.accountHubUserAgent}）。出站请求头由内层
+ *   适配器自建，聚合层够不着，故只能随 options 带过去、由内层覆写。**没配就一个
+ *   键都不挂** —— 与 `reasoningEffort` 同一处置：字段缺席 = 用内层自己的默认 UA，
+ *   出站形态与加这条通道之前逐字节一致。
  */
 function forwardOptions(options: GenerateOptions, entry: AutoRouteEntry): GenerateOptions {
   return {
@@ -389,6 +397,7 @@ function forwardOptions(options: GenerateOptions, entry: AutoRouteEntry): Genera
     model: entry.model,
     messages: rewriteMessagesForTarget(options.messages, entry.provider),
     ...entry.effort === undefined ? {} : { reasoningEffort: ReasoningEffortId(entry.effort) },
+    ...entry.userAgent === undefined ? {} : { accountHubUserAgent: entry.userAgent },
   }
 }
 

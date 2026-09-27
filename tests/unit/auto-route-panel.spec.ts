@@ -1532,4 +1532,32 @@ describe('AccountHubPage：左侧「自动路由」选项卡', () => {
     expect(rule, '名称输入必须是 border-box，否则内容盒会宽出内边距+描边并压住删除按钮').toContain('box-sizing: border-box')
     expect(rule, '名称输入仍需可被压缩，否则会反过来挤爆卡片头').toContain('min-width: 0')
   })
+
+  /**
+   * 真机缺陷锚点：「候选行字体太大」。
+   *
+   * `.dim-ah-arEntryText` 是 `.dim-ah-arEntryRow` 里那枚无边框文本按钮（点开候选编辑
+   * 弹窗），外观整体清掉、字体族走继承 —— 于是字号会跟着面板正文的 14px 走。用户真机
+   * 反馈这一行比周围偏大，故显式降到 `--dsw-font-xs-13-*` 那一档。
+   *
+   * ⚠️ 这两行长写**不是装饰**，删掉不会报错、不会崩，只会让字号悄悄回到 14px：
+   * 正因如此它最容易被当成冗余覆盖顺手清掉，故逐字钉住。顺序同样是判据 ——
+   * `font: inherit` 是 shorthand，挪到长写之后会把 font-size / line-height 一起拉回
+   * 继承值（同规则内后者胜），降档当场失效。
+   */
+  it('候选行文本显式降一档字号（删掉降档即回归真机「字体太大」）', () => {
+    const styles = readFileSync(resolve(here, '../../plugin-src/client/account-hub-styles.js'), 'utf8')
+    const at = styles.indexOf('.dim-ah-arEntryText {')
+    expect(at, 'account-hub-styles.js 里找不到 .dim-ah-arEntryText 规则').toBeGreaterThan(-1)
+    const rule = styles.slice(at, styles.indexOf('}', at))
+    expect(rule, '候选行必须显式降一档字号（退回 font: inherit 的 14px 就是真机那个「太大」）')
+      .toContain('--dsw-font-xs-13-font-size')
+    expect(rule, '行高必须跟着同一档令牌（否则 13px 字号配着上一档行高）')
+      .toContain('--dsw-font-xs-13-line-height')
+    const inheritAt = rule.indexOf('font: inherit')
+    const sizeAt = rule.indexOf('font-size:')
+    expect(inheritAt, 'font: inherit 必须保留（button 元素默认不继承字体族）').toBeGreaterThan(-1)
+    expect(sizeAt, '降档的 font-size 必须写在 font: inherit 之后（否则被 shorthand 覆盖回去）')
+      .toBeGreaterThan(inheritAt)
+  })
 })
