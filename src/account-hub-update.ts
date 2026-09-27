@@ -8,6 +8,8 @@ type AccountHubUpdateProgress = (
   detail: string,
 ) => void
 
+const NOOP_ACCOUNT_HUB_UPDATE_PROGRESS: AccountHubUpdateProgress = () => {}
+
 const RELEASES_LATEST_URL = 'https://api.github.com/repos/gurio-wine/dsh-account-hub/releases/latest'
 const COMMIT_BY_REF_URL_PREFIX = 'https://api.github.com/repos/gurio-wine/dsh-account-hub/commits/'
 const COMMIT_COMPARE_URL_PREFIX = 'https://api.github.com/repos/gurio-wine/dsh-account-hub/compare/'
@@ -24,6 +26,8 @@ export interface AccountHubUpdateProcessOutput {
 export interface AccountHubUpdateExecOptions {
   cwd: string
   timeoutMs: number
+  /** 子进程输出块的实时回调，供进度明细消费。 */
+  onOutput?: (text: string) => void
 }
 
 export type AccountHubUpdateExec = (
@@ -415,7 +419,7 @@ export function removeStaleAllowBuildEntries(workspaceFile: string, keepSha: str
 export async function applyAccountHubUpdate(
   deps: AccountHubUpdateDeps,
   channel: RpcUpdateChannel = 'stable',
-  onProgress: AccountHubUpdateProgress = () => {},
+  onProgress: AccountHubUpdateProgress = NOOP_ACCOUNT_HUB_UPDATE_PROGRESS,
   targetSha?: string,
 ): Promise<RpcUpdateApplyResponse> {
   const installSha = targetSha === undefined
@@ -439,7 +443,11 @@ export async function applyAccountHubUpdate(
     onProgress('removing', '正在卸载旧版本…')
     let removeOutput: AccountHubUpdateProcessOutput
     try {
-      removeOutput = await deps.exec('pnpm', ['remove', 'dsh-account-hub'], execOptions)
+      removeOutput = await deps.exec(
+        'pnpm',
+        ['remove', 'dsh-account-hub'],
+        withOutputProgress(execOptions, 'removing', onProgress),
+      )
     } catch (error) {
       throwWithLog(error, formatInstallLog(processOutputFromError(error)))
     }
@@ -458,7 +466,7 @@ export async function applyAccountHubUpdate(
     addOutput = await deps.exec(
       'pnpm',
       ['add', `${ACCOUNT_HUB_GITHUB_PIN}#${installSha}`, '--config.minimum-release-age=0'],
-      execOptions,
+      withOutputProgress(execOptions, 'installing', onProgress),
     )
   } catch (error) {
     throwWithLog(error, joinInstallLogs(removeLog, formatInstallLog(processOutputFromError(error))))
@@ -486,6 +494,47 @@ export async function applyAccountHubUpdate(
     console.warn(`[account-hub] 清理旧 allowBuilds 条目失败：${errorMessage(error)}`)
   }
   return { previousSha, currentSha, log }
+}
+
+function withOutputProgress(
+  options: AccountHubUpdateExecOptions,
+  phase: 'removing' | 'installing',
+  onProgress: AccountHubUpdateProgress,
+): AccountHubUpdateExecOptions {
+  if (onProgress === NOOP_ACCOUNT_HUB_UPDATE_PROGRESS) return options
+  return { ...options, onOutput: createOutputProgressReporter(phase, onProgress) }
+}
+
+function createOutputProgressReporter(
+  phase: 'removing' | 'installing',
+  onProgress: AccountHubUpdateProgress,
+): (text: string) => void {
+  let pendingText = ''
+  let latestDetail = ''
+  return (text) => {
+    pendingText += text
+    const lines = pendingText.split('\n')
+    pendingText = lines.pop() ?? ''
+    for (let index = lines.length - 1; index >= 0; index -= 1) {
+      const detail = cleanOutputDetail(lines[index])
+      if (detail.length === 0) continue
+      if (detail !== latestDetail) {
+        latestDetail = detail
+        onProgress(phase, detail)
+      }
+      return
+    }
+    const pendingDetail = cleanOutputDetail(pendingText)
+    if (pendingDetail.length > 0 && pendingDetail !== latestDetail) {
+      latestDetail = pendingDetail
+      onProgress(phase, pendingDetail)
+    }
+  }
+}
+
+function cleanOutputDetail(line: string): string {
+  const cleaned = line.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '').trim()
+  return cleaned.length > 120 ? `${cleaned.slice(0, 120)}…` : cleaned
 }
 
 function normalizeTargetSha(targetSha: string): string {

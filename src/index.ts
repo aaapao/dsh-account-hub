@@ -139,11 +139,15 @@ const runAccountHubUpdate: AccountHubUpdateExec = (command, args, options) =>
 
     child.stdout?.setEncoding('utf8')
     child.stdout?.on('data', (chunk: string | Buffer) => {
-      stdout += String(chunk)
+      const text = chunk.toString()
+      stdout += text
+      options.onOutput?.(text)
     })
     child.stderr?.setEncoding('utf8')
     child.stderr?.on('data', (chunk: string | Buffer) => {
-      stderr += String(chunk)
+      const text = chunk.toString()
+      stderr += text
+      options.onOutput?.(text)
     })
     child.once('error', (error) => complete(error))
     child.once('close', (code, signal) => {

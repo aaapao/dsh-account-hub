@@ -235,7 +235,7 @@ const STYLES = `
 
    ⚠️ **这一条不是布局装饰，是弹窗的可用性上限**：宿主 Modal 的 dialog 默认
    width 是 min(380px, 100%) 且**没有 max-height**。模型列表动辄上百条，靠内容撑高
-   会让弹窗高于视口、底部的「刷新 / 完成」被顶出屏幕（连滚动都到不了）。
+   会让弹窗高于视口、底部的刷新按钮被顶出屏幕（连滚动都到不了）。
    className 由 Modal 挂在 dialog 节点上（与宿主 .dialog 同一个元素，见
    Modal.tsx 的 clsx(css.dialog, className)），故这两条直接覆盖宿主的 380px 默认。
    注入顺序是**运行期**（installAccountHubStyles 往 head 末尾 append），晚于宿主
@@ -246,9 +246,8 @@ const STYLES = `
 .dim-ah-modalHead { flex: none; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .dim-ah-modalTitle { min-width: 0; display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px; font-size: var(--dsw-font-s-14-font-size); line-height: var(--dsw-font-s-14-line-height); font-weight: var(--dsw-font-s-strong-14-font-weight); color: var(--dsw-alias-label-primary); }
 .dim-ah-modalSubtitle { overflow: hidden; font-size: var(--dsw-font-xxs-12-font-size); line-height: var(--dsw-font-xxs-12-line-height); font-weight: var(--dsw-font-xxs-12-font-weight); color: var(--dsw-alias-label-tertiary); text-overflow: ellipsis; white-space: nowrap; }
-/* 头部右侧按钮组与标题里的计数徽标 */
+/* 头部右侧刷新按钮组 */
 .dim-ah-modelPanelActions { flex: none; display: flex; align-items: center; gap: 8px; }
-.dim-ah-modelPanelCount { font-size: var(--dsw-font-xxs-12-font-size); line-height: var(--dsw-font-xxs-12-line-height); font-weight: var(--dsw-font-xxs-12-font-weight); color: var(--dsw-alias-label-tertiary); }
 .dim-ah-modalHint { flex: none; margin: 10px 0 0; font-size: var(--dsw-font-xxs-12-font-size); line-height: var(--dsw-font-xxs-12-line-height); color: var(--dsw-alias-label-tertiary); }
 .dim-ah-modal .dim-ah-probeNotice { flex: none; margin: 10px 0 0; }
 /* 列表区独立滚动：头部与说明固定，模型多时只滚中间。
@@ -275,22 +274,11 @@ const STYLES = `
 .dim-ah-modelTier { flex: none; display: flex; align-items: center; justify-content: flex-end; gap: 6px; flex-wrap: wrap; }
 .dim-ah-tierOption { font-size: var(--dsw-font-xxs-12-font-size); line-height: var(--dsw-font-xxs-12-line-height); white-space: nowrap; }
 
-/* 消耗顺序 / 切换粒度：两个下拉**各占容器一半**，两者宽度之和恒等于这一排的宽度。
-   分组用 flex: 1 1 0 平分（basis 取 0 才是严格等宽：若留 auto，较长的那份文案
-   会把两份拉成不同宽度）；min-width: 0 让窄面板下继续压缩而不是撑破右栏。 */
+/* 消耗顺序 / 切换粒度：两个原生下拉各占容器一半，保留宿主控件的边框与状态外观。
+   分组用 flex: 1 1 0 平分（basis 取 0 才是严格等宽）；min-width: 0 让窄面板下继续压缩。 */
 .dim-ah-consumption { display: flex; gap: 8px; margin-bottom: 12px; }
-/* 分组本身是 grid 容器：唯一的子节点（Menu 的 .root 是 inline-flex）会被拉伸到
-   整列宽，故锚点宽度 = 分组宽度，不需要给 .root 再加类名。 */
 .dim-ah-consumptionGroup { flex: 1 1 0; min-width: 0; display: grid; }
-/* 锚点填满分组；文字与 chevron 分列两端。宽度由分组决定，不跟随选中项文案变化。 */
-.dim-ah-consumptionSelect { box-sizing: border-box; width: 100%; min-width: 0; justify-content: space-between; white-space: nowrap; }
-/* 展开的选项列表与锚点同宽（「弹层宽度 = 按钮宽度」）：Menu 的列表是 .root 内的
-   绝对定位子节点，而 .root 已被拉到分组宽度，故 100% 即按钮宽度。
-   面板没有用 portal（portal 会把列表挂到 body 上、失去这个包含块），
-   这一条必须在场，否则列表退回宿主 .list 的 min-width: 144px 内容宽。
-   宿主 .list 的 min-width 同为单类选择器，靠注入顺序（运行期 append 到 head
-   末尾）在同特异性下胜出 —— 与 .dim-ah-modal 覆盖宿主 dialog 宽度同一机制。 */
-.dim-ah-consumptionMenu { width: 100%; min-width: 0; }
+.dim-ah-select { box-sizing: border-box; width: 100%; min-width: 0; appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='M2.5 4.5 6 8l3.5-3.5' fill='none' stroke='%23666' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"); background-position: right 12px center; background-repeat: no-repeat; background-size: 12px 12px; padding-right: 32px; }
 
 /* 悬停提示的宿主锚点：包住非 forwardRef 的组件，使 Tooltip 能拿到真实 DOM 节点。
    inline-flex 不改变父级 flex/grid 的参与关系，也不给行内元素引入额外行高。 */

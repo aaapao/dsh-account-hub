@@ -479,8 +479,14 @@ describe('Hub 面板 UI 调整包（源码级回归）', () => {
  * `[a-z-]+` 而不是 `[a-z]+`：provider id 允许带连字符（`trae-cn` / `qoder-cn`
  * 都是），而只认小写字母的正则会让**带连字符的条目在 `PROVIDERS` 里隐形** ——
  * 匹配不进 `providerIds`，于是「集合相等」这条断言在漏登记时反而是绿的。
+ *
+ * `icon: [A-Z]` 前瞻判别真实 provider 条目：通道按钮（`{ id: 'stable', label: '正式' }`）
+ * 与真实条目同是 `{ id, label }` 开头的对象字面量，唯一稳定差异是真实 provider 必有
+ * `icon: XXX_ICON` 常量引用、通道按钮必无。不收紧会把通道按钮误当成 provider，
+ * 「PROVIDERS 恰好 7 项」与「能力矩阵覆盖每个 provider」两条断言对通道按钮
+ * 永远失败。完整形态模式（L493）本来就按 `icon:` 抓，这里是同一判据的精简版。
  */
-const PROVIDER_ENTRY_PATTERN = /\{\s*id:\s*'([a-z-]+)',\s*label:/g
+const PROVIDER_ENTRY_PATTERN = /\{\s*id:\s*'([a-z-]+)',\s*label:\s*'[^']*',\s*icon:/g
 
 /** 同上，但连 `label` / `icon` / `logoClass`（及可选的 `loginHint`）一起抓，供显示名与类名的断言使用。 */
 const PROVIDER_FULL_ENTRY_PATTERN =
@@ -574,7 +580,8 @@ describe('自动签到客户端 UI（源码级回归）', () => {
     expect(normalized).toContain('onCheckin: (id) => void checkinAccount(id)')
     // 按钮按门控直接渲染为图标 Button，不再包 Tooltip。
     expect(normalized).toMatch(/showCheckin\s*\n?\s*\? React\.createElement\(Button/)
-    expect(normalized).toContain("checkedIn ? '✓' : checkingThisAccount ? '◐' : '✉'")
+    expect(normalized).toContain("}, '✉')")
+    expect(normalized).not.toContain("checkedIn ? '✓' : checkingThisAccount ? '◐' : '✉'")
     expect(normalized).toContain("'aria-label': checkedIn ? '已签到' : checkingThisAccount ? '签到中' : '签到'")
     // disabled 三态：busy（面板忙碌）|| 已签 || 正在签到。
     expect(normalized).toContain('disabled: busy || checkedIn || checkingThisAccount')
@@ -620,8 +627,9 @@ describe('自动签到客户端 UI（源码级回归）', () => {
     expect(allCheckedInStart).toBeGreaterThan(-1)
     const allCheckedInBody = normalized.slice(allCheckedInStart, normalized.indexOf(';', allCheckedInStart))
     expect(allCheckedInBody, '`suppressed` 混进了「全部已签」的判据').not.toContain('suppressed')
-    // 单片按钮的三态文案与禁用条件都不读 `suppressed`。
-    expect(normalized).toContain("checkedIn ? '✓' : checkingThisAccount ? '◐' : '✉'")
+    // 单片按钮始终显示信封图标，aria-label 与禁用条件都不读 `suppressed`。
+    expect(normalized).toContain("}, '✉')")
+    expect(normalized).not.toContain("checkedIn ? '✓' : checkingThisAccount ? '◐' : '✉'")
     expect(normalized).toContain('disabled: busy || checkedIn || checkingThisAccount')
   })
 
@@ -694,8 +702,9 @@ describe('自动签到客户端 UI（源码级回归）', () => {
     expect(normalized).toContain('claimingRef.current = true;')
   })
 
-  it('头部一键签到以信封/进行中/勾选图标显示状态，全签时禁用', () => {
-    expect(normalized).toContain("claiming ? '◐' : allCheckedIn ? '✓' : '✉'")
+  it('头部一键签到始终以信封图标显示，全签时禁用', () => {
+    expect(normalized).toContain("React.createElement('span', { 'aria-hidden': 'true' }, '✉')")
+    expect(normalized).not.toContain("claiming ? '◐' : allCheckedIn ? '✓' : '✉'")
     expect(normalized).toContain("'aria-label': claiming ? '一键签到进行中' : allCheckedIn ? '全部已签' : '一键签到'")
     // 全签时禁用。
     expect(normalized).toContain('disabled: claiming || accounts.length === 0 || allCheckedIn')

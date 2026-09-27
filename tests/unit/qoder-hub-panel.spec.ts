@@ -365,11 +365,12 @@ describe('能力矩阵驱动的积分行为在客户端不被 qoder 特判', () 
     expect(normalized).toContain('const canLoadCredits = supportsCreditBalance(provider);')
     expect(normalized).toContain('const supportsCredits = supportsDailyCheckin(provider);')
     // 签到按钮按矩阵直接渲染 ui-primitives 的图标 Button，不再包 Tooltip。
-    // 点击回调仍必须是 claimCredits，状态由信封、进行中与勾选图标表达。
+    // 点击回调仍必须是 claimCredits，图标固定为信封，状态由 aria-label 与禁用条件表达。
     expect(normalized).toMatch(
       /supportsCredits\s*\n\s*\? React\.createElement\(Button, \{[\s\S]*?onClick: \(\) => void claimCredits\(\)/,
     )
-    expect(normalized).toContain("claiming ? '◐' : allCheckedIn ? '✓' : '✉'")
+    expect(normalized).toContain("React.createElement('span', { 'aria-hidden': 'true' }, '✉')")
+    expect(normalized).not.toContain("claiming ? '◐' : allCheckedIn ? '✓' : '✉'")
   })
 
   it('两个 Qoder region 走**同一条**能力矩阵路径（CN 不新增任何客户端分支）', () => {

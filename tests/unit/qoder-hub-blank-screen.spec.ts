@@ -794,12 +794,26 @@ describe('控件与样式迁移（源码级通盘闸门）', () => {
   const clientCode = codeOnly(clientSource)
   const styleCode = codeOnly(styleSource)
 
-  it('原生表单控件归零：没有 select / input / option / confirm', () => {
+  it('原生表单控件有白名单：消耗档位下拉用原生 select，其余仍归零', () => {
+    // 消耗档位下拉（ConsumptionSelect）经用户拍板改为宿主设置页同款的原生 select：
+    // 它是唯一豁免项，其余自绘 select / option / input 仍禁止 —— 白名单之外出现
+    // 即为新的样式体系逃逸。
     for (const native of [
-      "createElement('select'", "createElement('option'", "createElement('input'",
+      "createElement('input'",
     ]) {
       expect(clientCode, `仍在自绘原生控件：${native}`).not.toContain(native)
     }
+    // select / option 只允许出现在 ConsumptionSelect 函数体内（原生下拉本体），
+    // 文件其余位置出现即违规。
+    const selectStart = clientCode.indexOf('function ConsumptionSelect(')
+    const selectEnd = clientCode.indexOf('\nfunction ', selectStart + 1)
+    expect(selectStart, '找不到 ConsumptionSelect').toBeGreaterThan(-1)
+    const selectBody = clientCode.slice(selectStart, selectEnd)
+    const outside = clientCode.slice(0, selectStart) + clientCode.slice(selectEnd)
+    expect(selectBody, 'ConsumptionSelect 应使用原生 select').toContain("createElement('select'")
+    expect(selectBody, 'ConsumptionSelect 应使用原生 option').toContain("createElement('option'")
+    expect(outside, '白名单之外不得自绘 select').not.toContain("createElement('select'")
+    expect(outside, '白名单之外不得自绘 option').not.toContain("createElement('option'")
     // 原生 confirm 是浏览器自绘的模态，样式不进主题体系 —— 两处都改成了原语。
     expect(clientCode).not.toMatch(/\bconfirm\(/)
     // 反向锚点：替代物必须在位（否则「删了原生控件」也可能只是功能没了）。
@@ -811,17 +825,43 @@ describe('控件与样式迁移（源码级通盘闸门）', () => {
   it('按钮与拖拽手柄 Tooltip 按清单精简，其余提示保留', () => {
     expect(clientCode).toContain("'aria-label': '模型列表'")
     expect(clientCode).toContain("'aria-label': '刷新积分'")
+    expect(clientCode).toContain("'aria-label': '刷新模型列表'")
     expect(clientCode).toContain("'aria-label': '登录账号'")
+    expect(clientCode).not.toContain('modelPanelCount')
+    expect(clientCode).not.toContain('关闭开关后该模型不再出现在对话框的模型选择里；其余模型（含服务端新增的）默认显示。')
     expect(clientCode).not.toContain('MODEL_LIST_HELP')
     expect(clientCode).not.toContain('自动选号优先级')
     expect(clientCode).not.toContain('拖动以调整自动模型顺序')
     expect(clientCode).not.toContain('拖动以调整候选顺序（顺序即降级顺序）')
     expect(clientCode).not.toContain('通过浏览器登录一个新的账号并加入账号池。')
     expect(clientCode).not.toContain('重新查询本页全部账号的剩余积分（Credits Balance）。余额由服务端实时计算，点此可刷新。')
-    // 状态点、自动路由开关与菜单选项自己的简短提示保留。
+    // 状态点与自动路由开关的简短提示保留；消耗档位迁原生 select 后，各档说明
+    // 挂在 option 的 title 属性上（原生下拉项无自定义渲染，title 是唯一途径）。
     expect(clientCode).toContain("withHoverTitle(React.createElement(StateDot")
     expect(clientCode).toContain('开启后「自动路由」出现在 DSH 模型列表，其它 provider 从列表隐藏')
-    expect(clientCode).toContain('withHoverTitle(React.createElement(\'span\', null, option.label), option.hint)')
+    expect(clientCode).toContain("title: option.hint")
+  })
+
+  it('模型列表弹窗只保留标题行右侧的刷新符号按钮', () => {
+    const panelStart = clientSource.indexOf('function ModelListPanel(')
+    const panelEnd = clientSource.indexOf('\n/**', panelStart + 1)
+    expect(panelStart, '找不到 ModelListPanel').toBeGreaterThan(-1)
+    expect(panelEnd, '无法截取 ModelListPanel').toBeGreaterThan(panelStart)
+    const panel = clientSource.slice(panelStart, panelEnd)
+    const actionsAt = panel.indexOf("className: 'dim-ah-modelPanelActions'")
+    const refreshAt = panel.indexOf("'aria-label': '刷新模型列表'")
+    expect(actionsAt, '模型列表弹窗缺少标题行右侧按钮组').toBeGreaterThan(-1)
+    expect(refreshAt, '模型列表弹窗缺少刷新按钮').toBeGreaterThan(actionsAt)
+    expect(panel).toContain("className: 'dim-ah-iconBtn'")
+    expect(panel).toContain("className: 'dim-ah-iconGlyph'")
+    expect(panel).toContain("disabled: phase === 'loading'")
+    expect(panel).toContain("'data-loading': phase === 'loading' ? 'true' : undefined")
+    expect(panel).toContain("}, '⟳'))))")
+    expect(panel).not.toContain('modelPanelCount')
+    expect(panel).not.toContain('hiddenCount')
+    expect(panel).not.toContain('关闭开关后该模型不再出现在对话框的模型选择里；其余模型（含服务端新增的）默认显示。')
+    expect(panel).not.toContain("variant: 'primary'")
+    expect(styleCode).not.toContain('.dim-ah-modelPanelCount')
   })
 
   it('样式表无十六进制颜色且不含死 token', () => {
@@ -844,7 +884,7 @@ describe('控件与样式迁移（源码级通盘闸门）', () => {
   it('模型列表弹窗保留宽度 / 高度上限（迁移时曾被顺手删掉）', () => {
     // ⚠️ 这条规则**不是**自绘壳的一部分，故不能进上面那张死类清单：宿主 Modal 的
     // dialog 默认 `width: min(380px, 100%)` 且**没有 max-height**，而模型列表动辄
-    // 上百条 —— 少了上限，弹窗会高于视口、把「刷新 / 完成」顶出屏幕。
+    // 上百条 —— 少了上限，弹窗会高于视口、把刷新按钮顶出屏幕。
     // `className` 由 Modal 透传到 dialog 节点上（Modal.tsx 的 clsx(css.dialog, className)），
     // 故这两条直接覆盖宿主的 380px 默认。
     const at = styleCode.indexOf('.dim-ah-modal {')

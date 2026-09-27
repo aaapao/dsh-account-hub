@@ -124,6 +124,10 @@ function makeDeps(options: {
   recentMessages?: string[]
   releaseStatus?: number
   exec?: AccountHubUpdateExec
+  outputChunks?: {
+    remove?: string[]
+    add?: string[]
+  }
 } = {}): {
   deps: AccountHubUpdateDeps
   files: Map<string, string>
@@ -179,7 +183,11 @@ function makeDeps(options: {
     }
     throw new Error(`Unexpected GitHub API URL: ${url}`)
   })
-  const defaultExec: AccountHubUpdateExec = async (_command, args) => {
+  const defaultExec: AccountHubUpdateExec = async (_command, args, execOptions) => {
+    const outputChunks = args[0] === 'remove'
+      ? options.outputChunks?.remove ?? []
+      : options.outputChunks?.add ?? []
+    for (const chunk of outputChunks) execOptions.onOutput?.(chunk)
     if (args[0] === 'add') {
       const pin = String(args[1])
       const addedSha = pin.split('#').at(-1) ?? latestSha
@@ -587,6 +595,32 @@ describe('Account Hub 更新 RPC 逻辑', () => {
     ])
   })
 
+  it('apply 将 pnpm 输出清洗截断后按阶段实时上报', async () => {
+    const progress: Array<[string, string]> = []
+    const longLine = 'x'.repeat(121)
+    const { deps } = makeDeps({
+      outputChunks: {
+        remove: ['\x1b[31m正在卸载依赖\x1b[0m\n\n', '卸载完成\n'],
+        add: [`\x1b[32m${longLine}\x1b[0m\n`, '\n安装收尾\n'],
+      },
+    })
+
+    await applyAccountHubUpdate(deps, 'stable', (phase, detail) => {
+      progress.push([phase, detail])
+    })
+
+    expect(progress).toEqual([
+      ['removing', '正在卸载旧版本…'],
+      ['removing', '正在卸载依赖'],
+      ['removing', '卸载完成'],
+      ['installing', '正在安装新版本…'],
+      ['installing', `${longLine.slice(0, 120)}…`],
+      ['installing', '安装收尾'],
+      ['verifying', '正在验证安装…'],
+    ])
+    expect(progress.filter(([phase]) => phase === 'removing')).toHaveLength(3)
+    expect(progress.filter(([phase]) => phase === 'installing')).toHaveLength(3)
+  })
   it('apply beta 通道按 master HEAD SHA 安装', async () => {
     const { deps, exec } = makeDeps({
       latestTagSha: CURRENT_SHA,
@@ -733,7 +767,7 @@ describe('Account Hub 更新 RPC 逻辑', () => {
       2,
       'pnpm',
       ['add', `${ACCOUNT_HUB_PIN}#${LATEST_SHA}`, '--config.minimum-release-age=0'],
-      { cwd: PROFILE_ROOT, timeoutMs: 120_000 },
+      expect.objectContaining({ cwd: PROFILE_ROOT, timeoutMs: 120_000 }),
     )
   })
 
@@ -750,7 +784,7 @@ describe('Account Hub 更新 RPC 逻辑', () => {
       2,
       'pnpm',
       ['add', `${ACCOUNT_HUB_PIN}#${targetSha}`, '--config.minimum-release-age=0'],
-      { cwd: PROFILE_ROOT, timeoutMs: 120_000 },
+      expect.objectContaining({ cwd: PROFILE_ROOT, timeoutMs: 120_000 }),
     )
 
     const invalid = await call('update.apply', { targetSha: 'invalid' })

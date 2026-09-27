@@ -751,7 +751,7 @@ function AccountCard({ account, index, order, onToggle, onDelete, busy, credits,
             // 与面板级 `claiming` 是两个维度，两个都要判。
             disabled: busy || checkedIn || checkingThisAccount,
             onClick: () => onCheckin(account.id),
-          }, checkedIn ? '✓' : checkingThisAccount ? '◐' : '✉')
+          }, '✉')
         : null,
       React.createElement(Button, {
         variant: 'outline',
@@ -1027,7 +1027,6 @@ function ModelListPanel({ provider, rpcCall, onClose }) {
   };
 
   const all = models || [];
-  const hiddenCount = all.filter(m => m.disabled).length;
   const providerLabel = PROVIDERS.find(p => p.id === provider)?.label || provider;
 
   /**
@@ -1074,10 +1073,8 @@ function ModelListPanel({ provider, rpcCall, onClose }) {
   /**
    * 弹窗本体：`Modal` 原语（遮罩 / 居中卡片 / Escape / aria 全部由它负责）。
    *
-   * 迁移前这里是手写的遮罩 + 卡片（曾经的 `.dim-ah-modalOverlay`，已删；`position: fixed`
-   * 自绘遮罩）。换成原语后**内容与交互流程一个字节没变**：标题、副标题、
-   * 计数、两个头部按钮、三行说明、错误提示、四种主体状态（错误 / 读取中 /
-   * 空 / 列表）全部照旧，只有承载它们的壳换成了设计体系的实现。
+   * 内容与交互流程仍由标题、副标题、头部刷新按钮、说明、错误提示和四种主体状态组成。
+   * 承载它们的壳换成了设计体系的实现。
    *
    * ⚠️ 可读名仍由 `title` 撑住：`Modal` 把它同时用作 `aria-label` 与可见标题。
    * 迁移前可见标题是「模型列表」+ 副标题 provider 名，故这里 `title` 取
@@ -1093,31 +1090,20 @@ function ModelListPanel({ provider, rpcCall, onClose }) {
   },
     React.createElement('div', { className: 'dim-ah-modalHead' },
       React.createElement('div', { className: 'dim-ah-modalTitle' },
-        React.createElement('span', { className: 'dim-ah-modalSubtitle' }, providerLabel),
-        phase === 'ready'
-          ? React.createElement('span', { className: 'dim-ah-modelPanelCount' },
-              `${all.length} 个模型${hiddenCount > 0 ? `，已隐藏 ${hiddenCount} 个` : ''}`)
-          : null),
+        React.createElement('span', { className: 'dim-ah-modalSubtitle' }, providerLabel)),
       React.createElement('div', { className: 'dim-ah-modelPanelActions' },
         React.createElement(Button, {
           variant: 'outline',
           size: 'sm',
+          className: 'dim-ah-iconBtn',
+          'aria-label': '刷新模型列表',
           disabled: phase === 'loading',
           onClick: () => void load(),
-        }, phase === 'loading' ? '读取中…' : '刷新'),
-        React.createElement(Button, {
-          variant: 'primary',
-          size: 'sm',
-          onClick: onClose,
-        }, '完成'))),
-    React.createElement('p', { className: 'dim-ah-modalHint' },
-      '关闭开关后该模型不再出现在对话框的模型选择里；其余模型（含服务端新增的）默认显示。'),
-    // 目录来源提示（C3）：仅当 Host 明确播报 fallback 时显示 —— 措辞与
-    // 「当前为兜底清单」风格一致，说清「为什么列表这么短」与「它是可用的」。
-    catalogSource === 'fallback'
-      ? React.createElement('p', { className: 'dim-ah-modalHint' },
-        '当前为兜底清单（远端目录不可达），仅含少量实测可用模型；远端恢复后将自动回到完整目录。')
-      : null,
+        }, React.createElement('span', {
+          className: 'dim-ah-iconGlyph',
+          'data-loading': phase === 'loading' ? 'true' : undefined,
+          'aria-hidden': 'true',
+        }, '⟳')))),
     tierHint
       ? React.createElement('p', { className: 'dim-ah-modalHint' }, tierHint)
       : null,
@@ -1176,36 +1162,21 @@ const CONSUMPTION_SWITCH_OPTIONS = [
 const CONSUMPTION_DEFAULTS = { order: 'round-robin', switch: 'per-turn' };
 
 function ConsumptionSelect({ name, label, options, value, busy, onSelect }) {
-  const [open, setOpen] = React.useState(false);
-  const current = options.find(option => option.value === value);
-  const items = options.map(option => ({
-    id: option.value,
-    // 每档自己的说明仍挂在菜单项上，展开列表时逐档可见。
-    label: withHoverTitle(React.createElement('span', null, option.label), option.hint),
-  }));
+  const selectedValue = options.some(option => option.value === value)
+    ? value
+    : options[0]?.value || '';
   return React.createElement('div', { className: 'dim-ah-consumptionGroup', 'data-name': name },
-    React.createElement(Menu, {
-      open,
-      anchor: React.createElement(Button, {
-        variant: 'outline',
-        size: 'sm',
-        className: 'dim-ah-consumptionSelect',
-        'aria-label': label,
-        'aria-haspopup': 'menu',
-        'aria-expanded': open,
-        disabled: busy,
-        icon: React.createElement(IconChevronDownOutlineRegular),
-        onClick: () => setOpen(prev => !prev),
-      }, current ? current.label : value),
-      items,
-      // 「弹层宽度 = 按钮宽度」：宿主 Menu 的列表默认是内容宽（min-width: 144px），
-      // 与锚点无关，故必须给列表一个类名把它钉到 100%（见样式表）。
-      listClassName: 'dim-ah-consumptionMenu',
-      selectedId: value,
-      onSelect: (id) => { setOpen(false); onSelect(id); },
-      onClose: () => setOpen(false),
-      align: 'start',
-    }));
+    React.createElement('select', {
+      className: 'dim-ah-select',
+      'aria-label': label,
+      value: selectedValue,
+      disabled: busy,
+      onChange: (event) => onSelect(event.target.value),
+    }, ...options.map(option => React.createElement('option', {
+      key: option.value,
+      value: option.value,
+      title: option.hint,
+    }, option.label))));
 }
 
 /**
@@ -1219,7 +1190,7 @@ function ConsumptionSelect({ name, label, options, value, busy, onSelect }) {
  *
  * ⚠️ 界面上**刻意没有**可见的设置名、解释文案与外框：需求是「就两个下拉」。
  * 下拉与账号卡片之间也不再有任何提示段落（原先那条排序提示已删除）。设置名通过
- * `aria-label` 提供；各档说明仅在展开的菜单选项中显示。
+ * `aria-label` 提供；各档说明挂在原生 `option` 的 `title` 上。
  *
  * ## 为什么是受控组件 + 不做乐观更新
  *
@@ -2117,7 +2088,7 @@ function ProviderPanel({ provider, rpcCall }) {
                 'aria-label': claiming ? '一键签到进行中' : allCheckedIn ? '全部已签' : '一键签到',
                 disabled: claiming || accounts.length === 0 || allCheckedIn,
                 onClick: () => void claimCredits(),
-              }, React.createElement('span', { 'aria-hidden': 'true' }, claiming ? '◐' : allCheckedIn ? '✓' : '✉'))
+              }, React.createElement('span', { 'aria-hidden': 'true' }, '✉'))
             : null,
           React.createElement(Button, {
             variant: 'outline',
