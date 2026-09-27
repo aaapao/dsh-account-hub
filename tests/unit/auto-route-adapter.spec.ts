@@ -1459,3 +1459,132 @@ describe('installAutoRouteEffortGuard：剥掉会话侧残留档位（不打死�
     expect(target.seen.get('p-a')![0].reasoningEffort).toBe('low') // 目标自己的默认档
   })
 })
+
+// ──────────────────────────── 15. 两个头覆写通道的转发注入 ────────────────────────────
+
+/**
+ * 头覆写通道在**转发**这一步的注入断言（`forwardOptions()`，`src/auto-route-adapter.ts`）。
+ *
+ * ## 为什么这一层必须单独钉住
+ *
+ * 出站请求头由**内层真实适配器**自建，聚合层一点都碰不到：`ctx.llm.stream()` 没有
+ * 「带自定义头」这个入口。故聚合层唯一能做的就是把候选条目的值挂到 options 的
+ * 内部通道字段上（`accountHubUserAgent` / `accountHubOriginator`），随对象一起穿过
+ * `ctx.llm.stream()`，由内层在构造完自己的头**之后**应用。
+ *
+ * 于是「注入」与「应用」是两个**各自会独立失效**的接缝：
+ * - 注入漏了 → 内层读不到值，用户配了覆写却什么都没发生（且没有任何报错）；
+ * - 应用漏了 → 同上。
+ * 本组用例守的是前者（后者由各适配器 spec 的出站头断言守）。这里的断言对象是
+ * **内层适配器 `stream()` 真正收到的那个对象**，而不是 `forwardOptions` 的返回值 ——
+ * 因为中间还夹着宿主 `LlmRuntime` 的适配器选择与能力解析，只有端到端的形态才能
+ * 证明「值确实穿过去了」（见本文件模块头对 mock 边界的说明）。
+ */
+describe('stream：两个头覆写通道在转发时注入 options', () => {
+  /** 内层收到的 options 的通道字段形态（内部协议字段不在宿主 `GenerateOptions` 类型里）。 */
+  type ForwardedOptions = GenerateOptions & {
+    accountHubUserAgent?: string
+    accountHubOriginator?: string
+  }
+
+  it('条目**配了** userAgent + originator → 内层收到的 options 里两个键都在且值正确', async () => {
+    const cfg = () => config(true, [def('m1', '自动一号', [
+      { provider: 'p-a', model: 'a', userAgent: 'AutoRoute/1.0', originator: 'my-app' },
+    ])])
+    const { adapter, target } = await harness({ config: cfg })
+    target.queue('p-a', { kind: 'chunks', chunks: [{ type: 'finish', reason: { kind: 'stop' } }] })
+
+    await drain(adapter, 'm1')
+
+    const forwarded = target.seen.get('p-a')![0] as ForwardedOptions
+    // ⚠️ 两条通道的注入是**两行独立代码**：只写一行 = 另一条通道整条失效，
+    // 而面板上那个值明明配着（用户以为生效了）。
+    expect(
+      forwarded.accountHubUserAgent,
+      'User-Agent 通道：条目配的值必须随 options 到达内层适配器，否则覆写永远不会落到出站头',
+    ).toBe('AutoRoute/1.0')
+    expect(
+      forwarded.accountHubOriginator,
+      'Originator 通道：与 UA 逐字同款的一行，漏写它等于该通道整条失效且无任何报错',
+    ).toBe('my-app')
+  })
+
+  it('条目**缺省**两者 → options 里这两个键**都不存在**（不是空串、不是 undefined）', async () => {
+    const cfg = () => config(true, [def('m1', '自动一号', [{ provider: 'p-a', model: 'a' }])])
+    const { adapter, target } = await harness({ config: cfg })
+    target.queue('p-a', { kind: 'chunks', chunks: [{ type: 'finish', reason: { kind: 'stop' } }] })
+
+    await drain(adapter, 'm1')
+
+    const forwarded = target.seen.get('p-a')![0] as ForwardedOptions
+    // ⚠️ 判据必须是「键不存在」而不是「值为空」：缺省路径要保证出站形态与加这两条
+    // 通道之前**逐字节一致**（AGENTS.md 的出站协议值红线）。写成 `field: undefined`
+    // 会让「没配」与「配了个 undefined」在 `in` 判据下混同，也会让任何按 `in` 分支的
+    // 内层实现（或调试时的对象打印）凭空多出一个键。
+    expect(
+      'accountHubUserAgent' in forwarded,
+      'User-Agent 通道缺省时**一个键都不该挂**：字段缺席 = 用内层自己的默认 UA',
+    ).toBe(false)
+    expect(
+      'accountHubOriginator' in forwarded,
+      'Originator 通道缺省时**一个键都不该挂**：该头在七家上游协议里本就不存在，缺省必须一个字节都不发',
+    ).toBe(false)
+    // 反面判据：不能是空串占位（空串同样会被判为非法而「不覆写」，但它在对象里
+    // 是个实实在在的键，会让上面两条 `in` 断言失去意义）。
+    expect(forwarded.accountHubUserAgent).toBeUndefined()
+    expect(forwarded.accountHubOriginator).toBeUndefined()
+  })
+
+  it('只配 userAgent → originator 键不挂（两条通道**互不牵连**，不互相补空）', async () => {
+    // 反面判据：若实现把两条通道写成「要么都挂、要么都不挂」，用户只配 UA 时就会
+    // 多出一个空的 Originator 键 —— 而它一旦被内层当成合法值，就会凭空发出一个头。
+    const cfg = () => config(true, [def('m1', '自动一号', [
+      { provider: 'p-a', model: 'a', userAgent: 'AutoRoute/1.0' },
+    ])])
+    const { adapter, target } = await harness({ config: cfg })
+    target.queue('p-a', { kind: 'chunks', chunks: [{ type: 'finish', reason: { kind: 'stop' } }] })
+
+    await drain(adapter, 'm1')
+
+    const forwarded = target.seen.get('p-a')![0] as ForwardedOptions
+    expect(forwarded.accountHubUserAgent).toBe('AutoRoute/1.0')
+    expect('accountHubOriginator' in forwarded).toBe(false)
+  })
+
+  it('只配 originator → userAgent 键不挂（反向对偶）', async () => {
+    const cfg = () => config(true, [def('m1', '自动一号', [
+      { provider: 'p-a', model: 'a', originator: 'my-app' },
+    ])])
+    const { adapter, target } = await harness({ config: cfg })
+    target.queue('p-a', { kind: 'chunks', chunks: [{ type: 'finish', reason: { kind: 'stop' } }] })
+
+    await drain(adapter, 'm1')
+
+    const forwarded = target.seen.get('p-a')![0] as ForwardedOptions
+    expect(forwarded.accountHubOriginator).toBe('my-app')
+    expect('accountHubUserAgent' in forwarded).toBe(false)
+  })
+
+  it('降级到第二个条目时，**失败条目配的覆写值不会漏给成功条目**（每条候选各自成对）', async () => {
+    // 降级是「换一个 provider/model 重发同一次请求」，故注入必须按**当次尝试的条目**
+    // 重算。若实现把值缓存在请求级（例如写在闭包外的变量里），用户给 a 配的 UA 就会
+    // 跟着发到 b 去 —— 出站身份被悄悄改成了另一家的形态。
+    const cfg = () => config(true, [def('m1', '自动一号', [
+      { provider: 'p-a', model: 'a', userAgent: 'OnlyForA/1.0', originator: 'app-a' },
+      { provider: 'p-b', model: 'b' },
+    ])])
+    const { adapter, target } = await harness({ config: cfg })
+    target.queue('p-a', { kind: 'error', code: 'SERVER', message: 'a 挂了' })
+    target.queue('p-b', { kind: 'chunks', chunks: [{ type: 'finish', reason: { kind: 'stop' } }] })
+
+    await drain(adapter, 'm1')
+
+    const failed = target.seen.get('p-a')![0] as ForwardedOptions
+    const succeeded = target.seen.get('p-b')![0] as ForwardedOptions
+    expect(failed.accountHubUserAgent).toBe('OnlyForA/1.0')
+    expect(failed.accountHubOriginator).toBe('app-a')
+    // b 没配 ⇒ 两个键都不挂（绝不继承 a 的值）。
+    expect('accountHubUserAgent' in succeeded).toBe(false)
+    expect('accountHubOriginator' in succeeded).toBe(false)
+  })
+})

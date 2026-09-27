@@ -3,7 +3,7 @@ import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { describe, expect, it } from 'vitest'
 import { CHAT_API_BASE, BuddyAdapter, DEFAULT_MODEL, registerBuddyLlm } from '../../src/buddy-adapter.js'
 import type { BuddyCredential, BuddyRemoteModel } from '../../src/buddy.js'
-import { BUDDY_CN, BUDDY, type BuddyProduct } from '../../src/product.js'
+import { BUDDY_CN, BUDDY, resolveUserAgent, type BuddyProduct } from '../../src/product.js'
 
 const CREDENTIAL_REF = credentialRef('BUDDY_CN_ACCESS_TOKEN')
 
@@ -2306,5 +2306,111 @@ describe('BuddyAdapter 模型黑名单', () => {
     expect(resolved.id).toBe('glm-5.2')
     // 兜底表口径是最大档（CN 的 1M 系 → 1M）。
     expect(resolved.context?.contextWindow).toBe(1_000_000)
+  })
+})
+
+/**
+ * BuddyAdapter：Account Hub 头覆写通道的**出站接线**。
+ *
+ * ## 这条线守的是什么
+ *
+ * helper 自身的语义（Headers / 普通对象两形态怎么写、非法值怎么当「没有」）由
+ * `tests/unit/account-hub-header-overrides.spec.ts` 覆盖；聚合层把候选条目的
+ * `userAgent` / `originator` 挂进 options 由 `tests/unit/auto-route-adapter.spec.ts`
+ * 覆盖。两者都绿**仍不能证明** Buddy 这条线真的会覆写 —— 中间还差
+ * 「`send()` 在构造完自己的头之后确实调了 helper」这一步。漏掉它（接线漏一行），
+ * 用户配了覆写却什么都没发生，且**没有任何报错**（面板上那个值明明配着）。
+ *
+ * ## 为什么是 `Headers` 形态
+ *
+ * Buddy 的 `send()` 是 `new Headers(attributionHeaders())` 起步的，UA 用
+ * `headers.set('User-Agent', resolveUserAgent(...))` 写入 —— 故这里断言的是
+ * 「`set` 覆盖了框架注入的**小写** `user-agent`」这条性质。trae-cn 那条线是
+ * 普通对象形态（helper 要先清异形键），两套落地机制不同，两条都要各自被测到。
+ *
+ * ## 一份适配器两个产品
+ *
+ * `buddy-cn` 与 `buddy` 共用同一个 `BuddyAdapter`、同一份 `send()`，故只测 CN
+ * 一个产品即可（国际版走的是同一行接线，不存在只漏一家的可能）。
+ */
+describe('BuddyAdapter：Account Hub 头覆写通道', () => {
+  /** 覆写通道的内部协议字段（不在宿主 `GenerateOptions` 类型里）。 */
+  type OverrideOptions = { accountHubUserAgent?: string; accountHubOriginator?: string }
+
+  /** 跑一次 stream，返回 `fetchImpl` 实际收到的出站头。 */
+  async function outboundHeaders(overrides: OverrideOptions): Promise<Headers> {
+    let seen: Headers | undefined
+    const adapter = makeAdapter({
+      fetchImpl: async (_url, init) => {
+        seen = new Headers(init?.headers as HeadersInit)
+        return sseResponse('data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n')
+      },
+    })
+    await collectChunks(adapter, {
+      model: DEFAULT_MODEL,
+      messages: [{ role: 'user', content: 'hi' }],
+      signal: new AbortController().signal,
+      ...overrides,
+    } as never)
+    expect(
+      seen,
+      '前置条件：覆写断言必须建立在**真的发出了请求**之上（没发请求就没有出站头可断言）',
+    ).toBeDefined()
+    return seen!
+  }
+
+  it('配了 userAgent + originator → 出站 `User-Agent` 等于覆写值、`Originator` 等于配置值', async () => {
+    const headers = await outboundHeaders({
+      accountHubUserAgent: 'AutoRoute/1.0',
+      accountHubOriginator: 'my-app',
+    })
+
+    expect(
+      headers.get('User-Agent'),
+      'User-Agent 通道：配了覆写值就必须**整体换掉**按模型族算出的产品 UA'
+      + '（attributionHeaders 注入的是小写 user-agent，Headers.set 大小写不敏感，能覆盖它）'
+      + '—— 不换等于用户配了却什么都没发生，且没有任何报错',
+    ).toBe('AutoRoute/1.0')
+    expect(
+      headers.get('Originator'),
+      'Originator 通道：该头在 buddy 系协议里本就不存在，配了值就必须**新增**它；'
+      + '这条与 UA 是两行独立接线，只接一行等于另一条整条静默失效',
+    ).toBe('my-app')
+  })
+
+  it('不配两者 → `User-Agent` 仍是该产品默认值，且 `Originator` 头**不存在**', async () => {
+    const headers = await outboundHeaders({})
+
+    // 默认路径零变化：UA 仍是 `send()` 里 `resolveUserAgent(product, model)` 算出的值。
+    // 用同一个函数取值而不是抄字面量 —— 它就是同一个来源，抄一份常量会在产品配置
+    // 改版本号（如 CodeBuddyIDE/1.106.1 升级）时静默失效。
+    expect(
+      headers.get('User-Agent'),
+      '缺省路径：UA 必须仍是该产品的默认值（出站形态与加这两条通道之前逐字节一致，'
+      + 'AGENTS.md「出站协议值不随 provider id / 显示名变化」红线）',
+    ).toBe(resolveUserAgent(BUDDY_CN, DEFAULT_MODEL))
+    // ⚠️ `Originator` 是**新增头**通道，不是覆写既有头：缺省时它必须一个都不发。
+    expect(
+      headers.get('Originator'),
+      'Originator 在七家上游协议里都不存在，缺省必须**一个字节都不发**（不是发空串）',
+    ).toBeNull()
+  })
+
+  it('只配一条 → 另一条不受牵连（两条通道互不牵连的反面判据）', async () => {
+    // 若实现写成「要么都发、要么都不发」，只配 UA 时就会凭空多出一个 Originator 头
+    // —— 出站身份被加了一个上游从未见过的头；反过来只配 originator 时默认 UA 会被清空。
+    const uaOnly = await outboundHeaders({ accountHubUserAgent: 'AutoRoute/1.0' })
+    expect(uaOnly.get('User-Agent')).toBe('AutoRoute/1.0')
+    expect(
+      uaOnly.get('Originator'),
+      '只配 userAgent 时 Originator 必须仍然不发（它只认 accountHubOriginator 字段）',
+    ).toBeNull()
+
+    const originatorOnly = await outboundHeaders({ accountHubOriginator: 'my-app' })
+    expect(originatorOnly.get('Originator')).toBe('my-app')
+    expect(
+      originatorOnly.get('User-Agent'),
+      '只配 originator 时 UA 必须仍是该产品默认值（Originator 通道不得顺手改写 UA）',
+    ).toBe(resolveUserAgent(BUDDY_CN, DEFAULT_MODEL))
   })
 })

@@ -1,4 +1,4 @@
-import { LlmError } from '@deepseek-ai/dsh-llm'
+import { LlmError, userAgent } from '@deepseek-ai/dsh-llm'
 import { describe, expect, it, vi } from 'vitest'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { CHAT_API_BASE, CodeArtsAdapter, QUEUE_STATUS_BASE } from '../../src/llm-adapter.js'
@@ -1918,5 +1918,92 @@ describe('CodeArtsAdapter', () => {
     // 不完整 thought 作为 reasoning 放行，不泄漏到正文
     expect(textDeltas.join('')).toBe('')
     expect(reasoningDeltas.join('')).toBe('我正在思考')
+  })
+})
+
+/**
+ * Account Hub **两个头覆写通道**在 CodeArts 出站请求上的落地断言。
+ *
+ * ## 这条链路为什么必须在**本文件**钉住
+ *
+ * `tests/unit/account-hub-header-overrides.spec.ts` 守的是 helper 自己的语义
+ * （Headers / 普通对象两形态怎么写、非法值怎么当「没有」），
+ * `tests/unit/auto-route-adapter.spec.ts` 守的是聚合层把值挂进 options。
+ * 两者都绿**仍不能证明** CodeArts 这条线真的会覆写 —— 中间还差「`send()` 在
+ * 构造完自己的头之后确实调了 helper」这一步。漏掉它，用户配了覆写却什么都没发生，
+ * 且没有任何报错（面板上那个值明明配着）。
+ *
+ * ## 为什么用 `Headers` 形态而不是普通对象
+ *
+ * CodeArts 的 `send()` 是 `new Headers(attributionHeaders())` 起步的（普通对象
+ * 形态在 trae-cn / qoder 那两条线上），故这里断言的是「`set` 覆盖了框架注入的
+ * 小写 `user-agent`」这条性质 —— 与 trae-cn 的「清异形键」是两套不同的落地机制，
+ * 两条都要各自被测到。
+ *
+ * ## ⚠️ 只断言 UA / Originator 两个键
+ *
+ * CodeArts 出站还带 `SDK-HMAC-SHA256` 签名头族（`Authorization` /
+ * `x-sdk-date` / `x-security-token` / …）。本组用例**刻意不碰它们**：
+ * 签名与覆写互不相干（两个头都不在 SignedHeaders 里，见 `src/llm-adapter.ts`
+ * 的接线注释），把签名断言混进来只会让「覆写失效」与「签名漂移」在失败信息上
+ * 混同。
+ */
+describe('CodeArtsAdapter：Account Hub 头覆写通道', () => {
+  /** 覆写通道的内部协议字段（不在宿主 `GenerateOptions` 类型里）。 */
+  type OverrideOptions = { accountHubUserAgent?: string; accountHubOriginator?: string }
+
+  /** 跑一次 stream，返回 `fetchImpl` 实际收到的出站头。 */
+  async function outboundHeaders(overrides: OverrideOptions): Promise<Headers> {
+    let seen: Headers | undefined
+    const fetchImpl = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      seen = new Headers(init?.headers)
+      return new Response('data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n', { status: 200 })
+    })
+    const adapter = makeAdapter({ fetchImpl })
+    for await (const _chunk of adapter.stream({ ...streamOptions, ...overrides } as never)) { /* drain */ }
+    expect(fetchImpl, '前置条件：覆写断言必须建立在**真的发出了请求**之上').toHaveBeenCalled()
+    return seen!
+  }
+
+  it('配了 userAgent + originator → 出站 `User-Agent` 等于覆写值、`Originator` 等于配置值', async () => {
+    const headers = await outboundHeaders({
+      accountHubUserAgent: 'AutoRoute/1.0',
+      accountHubOriginator: 'my-app',
+    })
+
+    expect(
+      headers.get('User-Agent'),
+      'User-Agent 通道：配了覆写值就必须**整体换掉**框架归属头（attributionHeaders 注入的是小写 '
+      + 'user-agent，Headers.set 大小写不敏感，能覆盖它）—— 不换等于用户配了却什么都没发生',
+    ).toBe('AutoRoute/1.0')
+    expect(
+      headers.get('Originator'),
+      'Originator 通道：该头在 CodeArts 协议里本就不存在，配了值就必须**新增**它；'
+      + '这条与 UA 是两行独立接线，只接一行等于另一条整条失效',
+    ).toBe('my-app')
+  })
+
+  it('不配两者 → `User-Agent` 仍是框架归属头默认值，且 `Originator` 头**不存在**', async () => {
+    const headers = await outboundHeaders({})
+
+    // 默认路径零变化：UA 仍是 `attributionHeaders()` 注入的框架 UA。用 `userAgent()`
+    // 取值而不是抄字面量 —— 它就是同一个来源，抄一份常量会在框架改版本号时失效。
+    expect(
+      headers.get('User-Agent'),
+      '缺省路径：UA 必须仍是框架归属头（出站形态与加这两条通道之前逐字节一致，AGENTS.md 出站协议值红线）',
+    ).toBe(userAgent())
+    // ⚠️ `Originator` 是**新增头**通道，不是覆写既有头：缺省时它必须一个都不发。
+    expect(
+      headers.get('Originator'),
+      'Originator 在七家上游协议里都不存在，缺省必须**一个字节都不发**（不是发空串）',
+    ).toBeNull()
+  })
+
+  it('只配 userAgent → Originator 仍不发（两条通道互不牵连）', async () => {
+    // 反面判据：若实现写成「要么都发、要么都不发」，只配 UA 时就会凭空多出一个
+    // Originator 头 —— 出站身份被加了一个上游从未见过的头。
+    const headers = await outboundHeaders({ accountHubUserAgent: 'AutoRoute/1.0' })
+    expect(headers.get('User-Agent')).toBe('AutoRoute/1.0')
+    expect(headers.get('Originator')).toBeNull()
   })
 })

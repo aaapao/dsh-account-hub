@@ -1786,6 +1786,111 @@ describe('TraeCnAdapter 请求构造', () => {
   })
 })
 
+/**
+ * TraeCnAdapter：Account Hub 头覆写通道的**出站接线**。
+ *
+ * ## 这条线守的是什么
+ *
+ * helper 自身的语义（Headers / 普通对象两形态怎么写、非法值怎么当「没有」）由
+ * `tests/unit/account-hub-header-overrides.spec.ts` 覆盖；聚合层把候选条目的
+ * `userAgent` / `originator` 挂进 options 由 `tests/unit/auto-route-adapter.spec.ts`
+ * 覆盖。两者都绿**仍不能证明** Trae CN 这条线真的会覆写 —— 中间还差
+ * 「`send()` 在构造完自己的头之后确实调了 helper」这一步。漏掉它（接线漏一行），
+ * 用户配了覆写却什么都没发生，且**没有任何报错**（面板上那个值明明配着）。
+ *
+ * ## 为什么这里断言的是**普通对象**形态
+ *
+ * Trae CN 的 `send()` 刻意不用 `new Headers(...)`（Headers 构造器会丢弃/规范化
+ * 部分头，见该处注释），出站头是**普通对象**逐字透传给 `fetch`。故这里断言的是
+ * 「helper 先清掉异形键、再写规范键」这条性质：若只写 `User-Agent` 而不清
+ * `user-agent`，同一次请求会出现两个 UA 头、上游看到拼接值 —— 那是最难查的一类
+ * 故障。buddy / lobsterai 两条线是 `Headers` 形态（`set` 天然覆盖），两套落地
+ * 机制不同，三条都要各自被测到。
+ */
+describe('TraeCnAdapter：Account Hub 头覆写通道', () => {
+  /** 覆写通道的内部协议字段（不在宿主 `GenerateOptions` 类型里）。 */
+  type OverrideOptions = { accountHubUserAgent?: string; accountHubOriginator?: string }
+
+  /** 跑一次 stream，返回 `fetchImpl` 实际收到的出站头（**普通对象**形态）。 */
+  async function outboundHeaders(overrides: OverrideOptions): Promise<Record<string, string>> {
+    const { adapter, calls } = makeAdapter(() => sseResponse(textStream('ok')))
+    await collect(adapter, generateOptions(overrides as never))
+    expect(
+      calls,
+      '前置条件：覆写断言必须建立在**真的发出了请求**之上（没发请求就没有出站头可断言）',
+    ).toHaveLength(1)
+    return calls[0]!.init?.headers as Record<string, string>
+  }
+
+  it('配了 userAgent + originator → 出站 `User-Agent` 等于覆写值、`Originator` 等于配置值', async () => {
+    const headers = await outboundHeaders({
+      accountHubUserAgent: 'AutoRoute/1.0',
+      accountHubOriginator: 'my-app',
+    })
+
+    expect(
+      headers['User-Agent'],
+      'User-Agent 通道：配了覆写值就必须**整体换掉** traeCnSoloHeaders 里的产品 UA'
+      + '—— 不换等于用户配了却什么都没发生，且没有任何报错',
+    ).toBe('AutoRoute/1.0')
+    // ⚠️ 异形键必须被清掉：普通对象逐字透传，留着 `user-agent` 就会变成同一次请求
+    // 里两个 UA 头，上游看到的是拼接值。
+    expect(
+      headers['user-agent'],
+      '普通对象形态：helper 必须先清掉异形键（user-agent）再写 User-Agent，'
+      + '否则同一次请求出现两个 UA 头、上游看到拼接值',
+    ).toBeUndefined()
+    expect(
+      headers['Originator'],
+      'Originator 通道：该头在 trae-cn 协议里本就不存在，配了值就必须**新增**它；'
+      + '这条与 UA 是两行独立接线，只接一行等于另一条整条静默失效',
+    ).toBe('my-app')
+    expect(
+      headers['originator'],
+      '普通对象形态：Originator 同样不得以异形键形态残留（会变成两个 Originator 头）',
+    ).toBeUndefined()
+  })
+
+  it('不配两者 → `User-Agent` 仍是该产品默认值，且 `Originator` 头**不存在**', async () => {
+    const headers = await outboundHeaders({})
+
+    // 默认路径零变化：UA 仍是 `traeCnSoloHeaders` 写入的 SOLO 通道 UA。
+    // 取产品常量而不是抄字面量 —— 它就是同一个来源，抄一份会在 SOLO 代际升版本时失效。
+    expect(
+      headers['User-Agent'],
+      '缺省路径：UA 必须仍是产品默认值（出站形态与加这两条通道之前逐字节一致，'
+      + 'AGENTS.md「出站协议值不随 provider id / 显示名变化」红线）',
+    ).toBe(TRAE_CN_SOLO_USER_AGENT)
+    // ⚠️ `Originator` 是**新增头**通道，不是覆写既有头：缺省时它必须一个都不发。
+    expect(
+      headers['Originator'],
+      'Originator 在七家上游协议里都不存在，缺省必须**一个字节都不发**（不是发空串）',
+    ).toBeUndefined()
+    expect(
+      headers['originator'],
+      '缺省时连异形键形态的 originator 也不能出现',
+    ).toBeUndefined()
+  })
+
+  it('只配一条 → 另一条不受牵连（两条通道互不牵连的反面判据）', async () => {
+    // 若实现写成「要么都发、要么都不发」，只配 UA 时就会凭空多出一个 Originator 头
+    // —— 出站身份被加了一个上游从未见过的头；反过来只配 originator 时默认 UA 会被清空。
+    const uaOnly = await outboundHeaders({ accountHubUserAgent: 'AutoRoute/1.0' })
+    expect(uaOnly['User-Agent']).toBe('AutoRoute/1.0')
+    expect(
+      uaOnly['Originator'],
+      '只配 userAgent 时 Originator 必须仍然不发（它只认 accountHubOriginator 字段）',
+    ).toBeUndefined()
+
+    const originatorOnly = await outboundHeaders({ accountHubOriginator: 'my-app' })
+    expect(originatorOnly['Originator']).toBe('my-app')
+    expect(
+      originatorOnly['User-Agent'],
+      '只配 originator 时 UA 必须仍是产品默认值（Originator 通道不得顺手改写 UA）',
+    ).toBe(TRAE_CN_SOLO_USER_AGENT)
+  })
+})
+
 describe('buildTraeCnSoloBody（纯函数，逐字段锁死出站形态）', () => {
   /** 用 harness 的真实消息类型构造一次调用。 */
   function bodyOf(options: Partial<GenerateOptions> = {}, functionName = 'solo_work_remote') {

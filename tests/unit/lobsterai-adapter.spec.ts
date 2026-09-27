@@ -991,3 +991,90 @@ describe('registerLobsteraiLlm', () => {
     expect(adapters).toEqual(['lobsterai'])
   })
 })
+
+/**
+ * LobsteraiAdapter：Account Hub 头覆写通道的**出站接线**。
+ *
+ * ## 这条线守的是什么
+ *
+ * helper 自身的语义（Headers / 普通对象两形态怎么写、非法值怎么当「没有」）由
+ * `tests/unit/account-hub-header-overrides.spec.ts` 覆盖；聚合层把候选条目的
+ * `userAgent` / `originator` 挂进 options 由 `tests/unit/auto-route-adapter.spec.ts`
+ * 覆盖。两者都绿**仍不能证明** LobsterAI 这条线真的会覆写 —— 中间还差
+ * 「`send()` 在构造完自己的头之后确实调了 helper」这一步。漏掉它（接线漏一行），
+ * 用户配了覆写却什么都没发生，且**没有任何报错**（面板上那个值明明配着）。
+ *
+ * ## 为什么是 `Headers` 形态
+ *
+ * LobsterAI 的 `send()` 是 `new Headers(lobsteraiChatHeaders(...))` 起步的，故这里
+ * 断言的是「`set` 覆盖了产品 UA」这条性质；trae-cn 那条线是普通对象形态
+ * （helper 要先清异形键），两套落地机制不同，两条都要各自被测到。
+ */
+describe('LobsteraiAdapter：Account Hub 头覆写通道', () => {
+  /** 覆写通道的内部协议字段（不在宿主 `GenerateOptions` 类型里）。 */
+  type OverrideOptions = { accountHubUserAgent?: string; accountHubOriginator?: string }
+
+  /** 跑一次 stream，返回 `fetchImpl` 实际收到的出站头。 */
+  async function outboundHeaders(overrides: OverrideOptions): Promise<Headers> {
+    const { adapter, calls } = makeAdapter(() => textSse('ok'))
+    await collect(generateOptions(overrides as never), adapter)
+    expect(
+      calls,
+      '前置条件：覆写断言必须建立在**真的发出了请求**之上（没发请求就没有出站头可断言）',
+    ).toHaveLength(1)
+    return calls[0]!.init?.headers as Headers
+  }
+
+  it('配了 userAgent + originator → 出站 `User-Agent` 等于覆写值、`Originator` 等于配置值', async () => {
+    const headers = await outboundHeaders({
+      accountHubUserAgent: 'AutoRoute/1.0',
+      accountHubOriginator: 'my-app',
+    })
+
+    expect(
+      headers.get('User-Agent'),
+      'User-Agent 通道：配了覆写值就必须**整体换掉** lobsteraiChatHeaders 里的产品 UA'
+      + '—— 不换等于用户配了却什么都没发生，且没有任何报错',
+    ).toBe('AutoRoute/1.0')
+    expect(
+      headers.get('Originator'),
+      'Originator 通道：该头在 LobsterAI 协议里本就不存在，配了值就必须**新增**它；'
+      + '这条与 UA 是两行独立接线，只接一行等于另一条整条静默失效',
+    ).toBe('my-app')
+  })
+
+  it('不配两者 → `User-Agent` 仍是该产品默认值，且 `Originator` 头**不存在**', async () => {
+    const headers = await outboundHeaders({})
+
+    // 默认路径零变化：UA 仍是 `lobsteraiChatHeaders` 写入的 `product.userAgent`。
+    // 取产品常量而不是抄字面量 —— 它就是同一个来源，抄一份会在产品改版本号时静默失效。
+    expect(
+      headers.get('User-Agent'),
+      '缺省路径：UA 必须仍是产品默认值（出站形态与加这两条通道之前逐字节一致，'
+      + 'AGENTS.md「出站协议值不随 provider id / 显示名变化」红线）',
+    ).toBe(LOBSTERAI.userAgent)
+    // ⚠️ `Originator` 是**新增头**通道，不是覆写既有头：缺省时它必须一个都不发。
+    expect(
+      headers.get('Originator'),
+      'Originator 在七家上游协议里都不存在，缺省必须**一个字节都不发**（不是发空串）',
+    ).toBeNull()
+  })
+
+  it('只配一条 → 另一条不受牵连（两条通道互不牵连的反面判据）', async () => {
+    // 若实现写成「要么都发、要么都不发」，只配 UA 时就会凭空多出一个 Originator 头
+    // —— 出站身份被加了一个上游从未见过的头；反过来只配 originator 时默认 UA 会被清空。
+    const uaOnly = await outboundHeaders({ accountHubUserAgent: 'AutoRoute/1.0' })
+    expect(uaOnly.get('User-Agent')).toBe('AutoRoute/1.0')
+    expect(
+      uaOnly.get('Originator'),
+      '只配 userAgent 时 Originator 必须仍然不发（它只认 accountHubOriginator 字段）',
+    ).toBeNull()
+
+    const originatorOnly = await outboundHeaders({ accountHubOriginator: 'my-app' })
+    expect(originatorOnly.get('Originator')).toBe('my-app')
+    expect(
+      originatorOnly.get('User-Agent'),
+      '只配 originator 时 UA 必须仍是产品默认值（Originator 通道不得顺手改写 UA）',
+    ).toBe(LOBSTERAI.userAgent)
+  })
+})
