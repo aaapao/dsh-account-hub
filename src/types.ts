@@ -555,6 +555,8 @@ export interface RpcUpdateCheckResponse {
 /** RPC: `update.apply` 请求；channel 缺省为 stable。 */
 export interface RpcUpdateApplyRequest {
   channel?: RpcUpdateChannel
+  /** 客户端 check 缓存的目标 SHA；传入后直接安装该 SHA，避免 check/apply 两次 fetch 漂移。 */
+  targetSha?: string
 }
 
 /** RPC: `update.status` 请求；无入参。 */

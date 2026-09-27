@@ -6,6 +6,7 @@ import {
   applyAccountHubUpdate,
   checkAccountHubUpdate,
   extractAccountHubSha,
+  removeStaleAllowBuildEntries,
   type AccountHubUpdateDeps,
   type AccountHubUpdateExec,
 } from '../../src/account-hub-update.js'
@@ -442,6 +443,28 @@ describe('Account Hub 更新 RPC 逻辑', () => {
     expect(once.split(key)).toHaveLength(2)
   })
 
+  it('allowBuilds 清理旧 tarball 条目并保留当前 SHA 与空段头', () => {
+    const staleSha = 'c'.repeat(40)
+    const workspace = [
+      'allowBuilds:',
+      `  dsh-account-hub@https://codeload.github.com/gurio-wine/dsh-account-hub/tar.gz/${staleSha}: true`,
+      `  dsh-account-hub@https://codeload.github.com/gurio-wine/dsh-account-hub/tar.gz/${LATEST_SHA}: true # keep`,
+      '  esbuild: true',
+      '',
+    ].join('\n')
+
+    const cleaned = removeStaleAllowBuildEntries(workspace, LATEST_SHA)
+
+    expect(cleaned).not.toContain(staleSha)
+    expect(cleaned).toContain(`${LATEST_SHA}: true # keep`)
+    expect(cleaned).toContain('  esbuild: true')
+
+    const empty = removeStaleAllowBuildEntries(
+      `allowBuilds:\n  dsh-account-hub@https://codeload.github.com/gurio-wine/dsh-account-hub/tar.gz/${staleSha}: true\n`,
+      LATEST_SHA,
+    )
+    expect(empty).toBe('allowBuilds:\n')
+  })
   it('apply 在成功安装后确认 lockfile 已切换，并返回完整安装日志', async () => {
     const { deps, files, exec, fetcher } = makeDeps()
     const result = await applyAccountHubUpdate(deps)
@@ -472,6 +495,73 @@ describe('Account Hub 更新 RPC 逻辑', () => {
     expect(fetcher).toHaveBeenCalledTimes(2)
   })
 
+  it('apply 成功后清理旧 allowBuilds 条目并保留新 SHA', async () => {
+    const staleSha = 'c'.repeat(40)
+    const workspace = [
+      'allowBuilds:',
+      `  dsh-account-hub@https://codeload.github.com/gurio-wine/dsh-account-hub/tar.gz/${staleSha}: true`,
+      '  esbuild: true',
+      '',
+    ].join('\n')
+    const { deps, files } = makeDeps({ workspace })
+
+    await applyAccountHubUpdate(deps)
+
+    const cleaned = files.get(WORKSPACE_PATH) ?? ''
+    expect(cleaned).not.toContain(staleSha)
+    expect(cleaned).toContain(`${LATEST_SHA}: true`)
+    expect(cleaned).toContain('allowBuilds:')
+  })
+  it('allowBuilds 清理失败不影响成功安装返回', async () => {
+    const { deps } = makeDeps()
+    const originalReadFile = deps.readFile
+    let workspaceReads = 0
+    deps.readFile = async (path) => {
+      if (path === WORKSPACE_PATH) {
+        workspaceReads += 1
+        if (workspaceReads === 2) throw new Error('workspace cleanup failed')
+      }
+      return originalReadFile(path)
+    }
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      await expect(applyAccountHubUpdate(deps)).resolves.toMatchObject({
+        previousSha: CURRENT_SHA,
+        currentSha: LATEST_SHA,
+      })
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('清理旧 allowBuilds 条目失败'))
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('apply 传入 targetSha 时跳过 latest fetch 并安装指定 SHA', async () => {
+    const targetSha = 'c'.repeat(40)
+    const { deps, files, exec, fetcher } = makeDeps()
+
+    await expect(applyAccountHubUpdate(deps, 'stable', undefined, targetSha)).resolves.toMatchObject({
+      previousSha: CURRENT_SHA,
+      currentSha: targetSha,
+    })
+    expect(fetcher).not.toHaveBeenCalled()
+    expect(exec).toHaveBeenNthCalledWith(
+      2,
+      'pnpm',
+      ['add', `${ACCOUNT_HUB_PIN}#${targetSha}`, '--config.minimum-release-age=0'],
+      { cwd: PROFILE_ROOT, timeoutMs: 120_000 },
+    )
+    expect(files.get(PACKAGE_PATH)).toContain(targetSha)
+  })
+
+  it('apply 传入非法 targetSha 时在任何 fetch 或安装前失败', async () => {
+    const { deps, exec, fetcher } = makeDeps()
+
+    await expect(applyAccountHubUpdate(deps, 'stable', undefined, 'not-a-sha')).rejects.toThrow(
+      'targetSha 不是有效的 40 位 SHA',
+    )
+    expect(fetcher).not.toHaveBeenCalled()
+    expect(exec).not.toHaveBeenCalled()
+  })
   it('apply 按 removing、installing、verifying 顺序上报阶段，并在无依赖时跳过 removing', async () => {
     const progress: Array<[string, string]> = []
     const { deps } = makeDeps()
@@ -647,6 +737,26 @@ describe('Account Hub 更新 RPC 逻辑', () => {
     )
   })
 
+  it('update.apply RPC 透传 targetSha 并拒绝非法 targetSha', async () => {
+    const targetSha = 'c'.repeat(40)
+    const { deps, exec, fetcher } = makeDeps()
+    const call = makeUpdateRpcCaller(deps)
+
+    const result = await call('update.apply', { targetSha })
+    expect(result.ok).toBe(true)
+    expect(result.value).toMatchObject({ currentSha: targetSha })
+    expect(fetcher).not.toHaveBeenCalled()
+    expect(exec).toHaveBeenNthCalledWith(
+      2,
+      'pnpm',
+      ['add', `${ACCOUNT_HUB_PIN}#${targetSha}`, '--config.minimum-release-age=0'],
+      { cwd: PROFILE_ROOT, timeoutMs: 120_000 },
+    )
+
+    const invalid = await call('update.apply', { targetSha: 'invalid' })
+    expect(invalid.ok).toBe(false)
+    expect(invalid.error?.message).toContain('targetSha 不是有效的 40 位 SHA')
+  })
   it('pnpm 成功但 lockfile SHA 未变化时失败并附完整日志', async () => {
     const { deps } = makeDeps({
       exec: async () => ({ stdout: 'pnpm stdout', stderr: 'pnpm stderr' }),

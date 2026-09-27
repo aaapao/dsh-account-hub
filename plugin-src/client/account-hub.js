@@ -3234,6 +3234,12 @@ export function AccountHubPage({ rpcCall }) {
     // 成功后展示哪份日志，都来自检查阶段缓存的这份事实。通道从 store 读取，
     // 避免页面重渲染后闭包里的旧快照影响 apply 请求。
     const applyChannel = updateStore.get().channel || currentUpdateChannel;
+    const applyPayload = { channel: applyChannel };
+    const latestSha = updateStore.get().latestSha;
+    if (latestSha) {
+      // targetSha 是 check 缓存的目标版本，apply 装它，免疫 check/apply 两次 fetch 的 CDN 漂移。
+      applyPayload.targetSha = latestSha;
+    }
     updateStore.set(prev => ({ ...prev, phase: 'applying', progressDetail: '' }));
 
     let polling = true;
@@ -3253,7 +3259,7 @@ export function AccountHubPage({ rpcCall }) {
     };
 
     // 先发起安装，再立即读取一次状态，之后每 800ms 轮询阶段明细。
-    const applyPromise = rpcCall('update.apply', { channel: applyChannel });
+    const applyPromise = rpcCall('update.apply', applyPayload);
     void readProgress();
     progressTimer = setInterval(() => { void readProgress(); }, 800);
 

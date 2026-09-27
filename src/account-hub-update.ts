@@ -307,6 +307,32 @@ export async function checkAccountHubUpdate(
   }
 }
 
+interface AllowBuildsSection {
+  sectionIndex: number
+  sectionEnd: number
+  sectionIndent: number
+}
+
+function findAllowBuildsSection(lines: string[]): AllowBuildsSection | undefined {
+  const sectionIndices: number[] = []
+  for (let index = 0; index < lines.length; index += 1) {
+    if (/^([ \t]*)allowBuilds:\s*(?:#.*)?$/.test(lines[index])) sectionIndices.push(index)
+  }
+  if (sectionIndices.length > 1) throw new Error('pnpm-workspace.yaml 中存在多个 allowBuilds 段')
+
+  const sectionIndex = sectionIndices[0]
+  if (sectionIndex === undefined) return undefined
+
+  const sectionIndent = leadingWhitespaceLength(lines[sectionIndex])
+  let sectionEnd = sectionIndex + 1
+  while (sectionEnd < lines.length) {
+    const line = lines[sectionEnd]
+    if (line.trim() !== '' && leadingWhitespaceLength(line) <= sectionIndent) break
+    sectionEnd += 1
+  }
+  return { sectionIndex, sectionEnd, sectionIndent }
+}
+
 /**
  * 在 profile 根的 allowBuilds 下添加指定 tarball 的构建许可；同一条目重复调用不改文件。
  */
@@ -320,21 +346,10 @@ export function appendAccountHubAllowBuild(dependenciesFile: string, sha: string
   const lines = dependenciesFile.split(/\r?\n/)
   if (endsWithNewline) lines.pop()
 
-  const sectionIndices: number[] = []
-  for (let index = 0; index < lines.length; index += 1) {
-    if (/^([ \t]*)allowBuilds:\s*(?:#.*)?$/.test(lines[index])) sectionIndices.push(index)
-  }
-  if (sectionIndices.length > 1) throw new Error('pnpm-workspace.yaml 中存在多个 allowBuilds 段')
-
-  const sectionIndex = sectionIndices[0]
-  if (sectionIndex !== undefined) {
-    const sectionIndent = leadingWhitespaceLength(lines[sectionIndex])
-    let sectionEnd = sectionIndex + 1
-    while (sectionEnd < lines.length) {
-      const line = lines[sectionEnd]
-      if (line.trim() !== '' && leadingWhitespaceLength(line) <= sectionIndent) break
-      sectionEnd += 1
-    }
+  const section = findAllowBuildsSection(lines)
+  if (section !== undefined) {
+    const { sectionIndex, sectionIndent } = section
+    let sectionEnd = section.sectionEnd
 
     const entryPrefix = `${key}:`
     for (let index = sectionIndex + 1; index < sectionEnd; index += 1) {
@@ -366,18 +381,49 @@ export function appendAccountHubAllowBuild(dependenciesFile: string, sha: string
   return `${appended}${endsWithNewline ? newline : ''}`
 }
 
-/**
- * 应用最新更新。先取最新 SHA；无需更新时短路，否则执行 pnpm 并验证 lockfile 已切到目标 SHA。
- */
+/** 删除 Account Hub allowBuilds 段中除指定 SHA 外的旧 tarball 条目。 */
+export function removeStaleAllowBuildEntries(workspaceFile: string, keepSha: string): string {
+  if (!/^[0-9a-f]{40}$/i.test(keepSha)) throw new Error('保留版本不是有效的 40 位 SHA')
+  const normalizedKeepSha = keepSha.toLowerCase()
+  const newline = workspaceFile.includes('\r\n') ? '\r\n' : '\n'
+  const endsWithNewline = /\r?\n$/.test(workspaceFile)
+  const lines = workspaceFile.split(/\r?\n/)
+  if (endsWithNewline) lines.pop()
+
+  const section = findAllowBuildsSection(lines)
+  if (section === undefined) return workspaceFile
+
+  const entryPrefix = `dsh-account-hub@${TARBALL_URL_PREFIX}`
+  let sectionEnd = section.sectionEnd
+  for (let index = section.sectionIndex + 1; index < sectionEnd;) {
+    const trimmed = lines[index].trimStart()
+    if (!trimmed.startsWith(entryPrefix)) {
+      index += 1
+      continue
+    }
+    const sha = trimmed.slice(entryPrefix.length).match(/^([0-9a-f]{40})(?=\s*:)/i)?.[1]
+    if (sha === undefined || sha.toLowerCase() === normalizedKeepSha) {
+      index += 1
+      continue
+    }
+    lines.splice(index, 1)
+    sectionEnd -= 1
+  }
+  return joinLines(lines, newline, endsWithNewline)
+}
+
 export async function applyAccountHubUpdate(
   deps: AccountHubUpdateDeps,
   channel: RpcUpdateChannel = 'stable',
   onProgress: AccountHubUpdateProgress = () => {},
+  targetSha?: string,
 ): Promise<RpcUpdateApplyResponse> {
-  const latest = await fetchLatestVersion(deps, channel)
+  const installSha = targetSha === undefined
+    ? (await fetchLatestVersion(deps, channel)).sha
+    : normalizeTargetSha(targetSha)
   const lockPath = join(deps.profileRoot, 'pnpm-lock.yaml')
   const previousSha = findAccountHubSha(await deps.readFile(lockPath)) ?? ''
-  if (previousSha !== '' && latest.sha === previousSha) return { previousSha, currentSha: previousSha, log: '' }
+  if (targetSha === undefined && previousSha !== '' && installSha === previousSha) return { previousSha, currentSha: previousSha, log: '' }
 
   const packagePath = join(deps.profileRoot, 'package.json')
   const workspacePath = join(deps.profileRoot, 'pnpm-workspace.yaml')
@@ -403,7 +449,7 @@ export async function applyAccountHubUpdate(
   // pnpm remove 会删除 package.json 中的依赖字段，pnpm add 本身会写入带 SHA 的 pin；
   // 手工再写 pin 不仅冗余，还会在 remove 之后因字段不存在而必然失败。
   const workspace = await deps.readFile(workspacePath)
-  const updatedWorkspace = appendAccountHubAllowBuild(workspace, latest.sha)
+  const updatedWorkspace = appendAccountHubAllowBuild(workspace, installSha)
   if (updatedWorkspace !== workspace) await deps.writeFile(workspacePath, updatedWorkspace)
 
   let addOutput: AccountHubUpdateProcessOutput
@@ -411,7 +457,7 @@ export async function applyAccountHubUpdate(
   try {
     addOutput = await deps.exec(
       'pnpm',
-      ['add', `${ACCOUNT_HUB_GITHUB_PIN}#${latest.sha}`, '--config.minimum-release-age=0'],
+      ['add', `${ACCOUNT_HUB_GITHUB_PIN}#${installSha}`, '--config.minimum-release-age=0'],
       execOptions,
     )
   } catch (error) {
@@ -426,13 +472,25 @@ export async function applyAccountHubUpdate(
   } catch (error) {
     throwWithLog(error, log)
   }
-  if (currentSha !== latest.sha) {
+  if (currentSha !== installSha) {
     throwWithLog(
-      new Error(`更新后 lockfile 未切换到最新版本（期望 ${latest.sha}，实际 ${currentSha}）`),
+      new Error(`更新后 lockfile 未切换到最新版本（期望 ${installSha}，实际 ${currentSha}）`),
       log,
     )
   }
+  try {
+    const installedWorkspace = await deps.readFile(workspacePath)
+    const cleanedWorkspace = removeStaleAllowBuildEntries(installedWorkspace, currentSha)
+    if (cleanedWorkspace !== installedWorkspace) await deps.writeFile(workspacePath, cleanedWorkspace)
+  } catch (error) {
+    console.warn(`[account-hub] 清理旧 allowBuilds 条目失败：${errorMessage(error)}`)
+  }
   return { previousSha, currentSha, log }
+}
+
+function normalizeTargetSha(targetSha: string): string {
+  if (!/^[0-9a-f]{40}$/i.test(targetSha)) throw new Error('targetSha 不是有效的 40 位 SHA')
+  return targetSha.toLowerCase()
 }
 
 function leadingWhitespaceLength(line: string): number {

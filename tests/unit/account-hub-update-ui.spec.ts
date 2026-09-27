@@ -559,8 +559,33 @@ describe('页面级「检查更新 / 一键更新」（版本文本三态 + 通�
     expect(countOf(gatedCalls, 'update.apply'), '点击「更新」没有调用 update.apply').toBe(1)
     const applyCall = gatedCalls.find((call) => call.method === 'update.apply')!
     expect(applyCall.payload.channel, 'apply 应带当前通道 stable').toBe('stable')
+     expect(applyCall.payload.targetSha, 'apply 应透传 check 响应里的 latestSha').toBe(SHA_NEW)
     expect(textsOf(applyingTree).join(''), '更新过程应显示在版本文本位').toContain('正在安装新版本…')
     gate.resolve({ previousSha: SHA_OLD, currentSha: SHA_NEW, currentVersion: LATEST_TAG })
+  })
+
+  it('store 无 latestSha 时 update.apply 不带 targetSha', async () => {
+    const { calls, rpcCall } = makeUpdateRpc({
+      check: async () => ({
+        hasUpdate: true,
+        currentSha: SHA_OLD,
+        // latestSha 缺失：客户端必须省略 targetSha，避免服务端收到空值而拒绝。
+        latestTag: LATEST_TAG,
+        latestTitle: LATEST_TITLE,
+        latestVersion: LATEST_TAG,
+        currentVersion: CURRENT_VERSION,
+        changelog: CHANGELOG,
+      }),
+    })
+
+    const tree = await renderStable(client.AccountHubPage, { rpcCall }, client.hooks)
+    ;(findButtonByLabel(tree, '更新')!.props.onClick as () => void)()
+
+    const applyCall = calls.find((call) => call.method === 'update.apply')
+    expect(applyCall, '点击「更新」没有调用 update.apply').toBeDefined()
+    expect(applyCall!.payload.channel, 'apply 应带当前通道 stable').toBe('stable')
+    expect(Object.prototype.hasOwnProperty.call(applyCall!.payload, 'targetSha'), '无 latestSha 时不应发送 targetSha')
+      .toBe(false)
   })
 
   it('点「更新」：按钮保持「更新」但禁用，成功后显示「已更新到 <版本>，建议重启」', async () => {

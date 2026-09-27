@@ -1829,6 +1829,16 @@ function normalizeUpdateChannel(payload: unknown): RpcUpdateChannel {
   return (payload as { channel?: unknown }).channel === 'beta' ? 'beta' : 'stable'
 }
 
+function normalizeUpdateTargetSha(payload: unknown): string | undefined {
+  if (typeof payload !== 'object' || payload === null) return undefined
+  const targetSha = (payload as { targetSha?: unknown }).targetSha
+  if (targetSha === undefined) return undefined
+  if (typeof targetSha !== 'string' || !/^[0-9a-f]{40}$/i.test(targetSha)) {
+    throw new Error('targetSha 不是有效的 40 位 SHA')
+  }
+  return targetSha
+}
+
 /**
  * 注册 Account Hub 管理 API 端点。使用 ctx.connection.fetch.register() 注册 HTTP POST 端点。
  *
@@ -1975,6 +1985,7 @@ function registerAccountHubEndpoints(options: AccountHubRpcOptions): void {
 
       case 'update.apply': {
         const channel = normalizeUpdateChannel(payload)
+        const targetSha = normalizeUpdateTargetSha(payload)
         if (options.updateDeps === undefined) throw new Error('Account Hub 更新功能未初始化')
         accountHubApplyProgress = { phase: 'idle', detail: '' }
         try {
@@ -1984,6 +1995,7 @@ function registerAccountHubEndpoints(options: AccountHubRpcOptions): void {
             (phase, detail) => {
               accountHubApplyProgress = { phase, detail }
             },
+            targetSha,
           )
           accountHubApplyProgress = { phase: 'applied', detail: '安装完成' }
           return { ok: true, value }
