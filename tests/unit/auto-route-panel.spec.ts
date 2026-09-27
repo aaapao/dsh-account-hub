@@ -598,6 +598,18 @@ function typeInto(input: ElementNode, value: string): void {
   ;(input.props.onChange as (event: { target: { value: string } }) => void)({ target: { value } })
 }
 
+/**
+ * 最后一次 `autoroute.set` 载荷里「卡 1 行 1」那条候选的原文（修改即保存面板的
+ * 持久化真相源 —— 弹窗树只是投影，落库的是 RPC 载荷）。
+ */
+function entryOfLastSet(calls: { method: string, payload: unknown }[]): Record<string, unknown> {
+  const sets = calls.filter((c) => c.method === 'autoroute.set')
+  const payload = sets[sets.length - 1]!.payload as {
+    models: { entries: Record<string, unknown>[] }[],
+  }
+  return payload.models[1]!.entries[1]!
+}
+
 /** 选中一个 Menu 的某一项（`onSelect` 是唯一写入入口）。 */
 function selectInMenu(menu: ElementNode, id: string): void {
   ;(menu.menuProps!.onSelect as (id: string) => void)(id)
@@ -1107,6 +1119,36 @@ describe('AutoRoutePanel：思考档位（按需拉取 + 缓存）', () => {
     // 关键判据：`effort` **键被删掉**而不是留一个空串 —— 空串在写路径上非法。
     expect(editorMenus(tree)[2]!.menuProps!.selectedId, '「默认」= 不配 effort').toBeUndefined()
     expect(textsOf(editorRoot(tree)!)).toContain('默认')
+  })
+
+  it('Originator 行写的是 originator 键（漏字段分支会把它错写进 effort —— 真机缺陷）', async () => {
+    // 真机缺陷锚点：setEntryField 漏 'originator' 分支时，Originator 输入框的值会
+    // 落进 effort 兜底（{ ...entry, effort: value }），表现为「填 Originator 会填到
+    // 思考程度里去」。断言三段：值进 originator 键、effort 原样不动、重置把键摘掉。
+    const { calls, rpcCall } = makeRpc()
+    let tree = await settle(client.AutoRoutePanel, panelProps(rpcCall), client.hooks, true)
+    tree = await openEditor(tree, rpcCall, 1, 1)
+    const editor = editorRoot(tree)!
+    // 弹窗里两个 Input：User-Agent 与 Originator（按 aria-label 区分）。
+    const originatorInput = elementsOf(editor)
+      .find((el) => el.type === 'input' && el.props['aria-label'] === 'Originator')
+    expect(originatorInput, '弹窗里找不到 Originator 输入框').toBeDefined()
+
+    typeInto(originatorInput!, 'web-ide')
+    tree = await settle(client.AutoRoutePanel, panelProps(rpcCall), client.hooks)
+    // 第一判据：键进了 originator，且 effort 保持原值 high（不能被顶掉）。
+    expect(editorValuesOf(tree).effort, 'Originator 打字绝不能动 effort（真机缺陷的回归面）').toBe('high')
+    const persisted = entryOfLastSet(calls)
+    expect(persisted.originator, '值必须写进 originator 键').toBe('web-ide')
+
+    // 第二判据：重置按钮把键摘掉（不是留空串 —— 空串写路径非法）。
+    const resetButton = elementsOf(editorRoot(tree)!)
+      .find((el) => el.type === 'button' && el.props['aria-label'] === '重置 Originator')
+    ;(resetButton!.props.onClick as () => void)()
+    tree = await settle(client.AutoRoutePanel, panelProps(rpcCall), client.hooks)
+    const afterReset = entryOfLastSet(calls)
+    expect(afterReset.originator, '重置后 originator 键应当消失（不是空串）').toBeUndefined()
+    expect(afterReset.effort, '重置 Originator 不影响 effort').toBe('high')
   })
 })
 

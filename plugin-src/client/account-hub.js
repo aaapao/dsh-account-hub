@@ -2953,7 +2953,17 @@ function AutoRoutePanel({ rpcCall }) {
             delete withoutUa.userAgent;
             return withoutUa;
           }
-          // 「默认」= 删掉 effort 键（空串写进去是非法的）；userAgent 不跟着走。
+          if (field === 'originator') {
+            // 空值 = 回默认（不发此头）：与 userAgent 同款，把键摘掉。
+            // ⚠️ 缺这个分支时 'originator' 会落进下方 effort 兜底 —— 真机缺陷
+            // 「填 Originator 会填到思考程度里」正是这么来的。
+            if (value !== '') return { ...entry, originator: value };
+            const withoutOriginator = { ...entry };
+            delete withoutOriginator.originator;
+            return withoutOriginator;
+          }
+          // 「默认」= 删掉 effort 键（空串写进去是非法的）；userAgent / originator
+          // 这两个高级配置键不跟着 effort 走（各自有独立分支处理）。
           if (value === AUTO_ROUTE_DEFAULT_EFFORT) {
             const withoutEffort = { ...entry };
             delete withoutEffort.effort;
