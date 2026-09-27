@@ -30,6 +30,7 @@ import {
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, LlmModelInfo, LlmProviderInfo, LlmResolvedModelInfo, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { applyAccountHubUserAgent } from './account-hub-user-agent.js'
+import { applyAccountHubOriginator } from './account-hub-originator.js'
 import { AccountPool, providerCatalogVisible } from './account-pool.js'
 import { parseRateLimitError } from './llm-adapter.js'
 import {
@@ -1103,6 +1104,10 @@ export class LobsteraiAdapter extends LlmAdapter {
     // `lobsteraiChatHeaders` 里的产品 UA（没配则本行什么都不做，出站头零变化）。
     // 载荷与判据的唯一来源是 `src/account-hub-user-agent.ts`。
     applyAccountHubUserAgent(headers, options)
+    // Originator 通道（第二条覆写通道，与 UA 同构）：**新增**一个头，lobsterai 协议
+    // 里本就不存在 `Originator`，没配则一个字节都不发。载荷与判据在
+    // `src/account-hub-originator.ts`。
+    applyAccountHubOriginator(headers, options)
     try {
       return await this.fetchImpl(`${this.product.apiBase}${LOBSTERAI_CHAT_PATH}`, {
         method: 'POST',

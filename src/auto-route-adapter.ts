@@ -38,8 +38,10 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import { EMPTY_RESPONSE_CODE, LlmAdapter, LlmError, ReasoningEffortId, resolveRetryPolicy } from '@deepseek-ai/dsh-llm'
-// 只取类型：UA 覆写通道的形状（字段本体由 forwardOptions 写入、由内层适配器读取，
-// 见 `src/account-hub-user-agent.ts`）。import type 不进运行时依赖。
+// 只取类型：两条头覆写通道的形状（字段本体由 forwardOptions 写入、由内层适配器读取，
+// 见 `src/account-hub-user-agent.ts` 与 `src/account-hub-originator.ts`）。
+// import type 不进运行时依赖。
+import type { AccountHubOriginatorCarrier } from './account-hub-originator.js'
 import type { AccountHubUserAgentCarrier } from './account-hub-user-agent.js'
 import type {
   AdapterRegistrationHandle,
@@ -389,6 +391,12 @@ export class AutoRouteAdapter extends LlmAdapter {
  *   适配器自建，聚合层够不着，故只能随 options 带过去、由内层覆写。**没配就一个
  *   键都不挂** —— 与 `reasoningEffort` 同一处置：字段缺席 = 用内层自己的默认 UA，
  *   出站形态与加这条通道之前逐字节一致。
+ * - `accountHubOriginator`：与 `accountHubUserAgent` **逐字同款**的另一条内部通道
+ *   （{@link AccountHubOriginatorCarrier.accountHubOriginator}），缺省同样一个键都
+ *   不挂。两条通道的差别只在内层怎么用它：UA 是**换掉一个既有头**，Originator 是
+ *   **新增一个原本不存在的头**；但「聚合层只管把值带过去」这件事完全一样，故这里
+ *   两行的写法也必须一样（少一行 = 用户在面板里配了 Originator 却什么都没发生，
+ *   且没有任何报错）。
  */
 function forwardOptions(options: GenerateOptions, entry: AutoRouteEntry): GenerateOptions {
   return {
@@ -398,6 +406,7 @@ function forwardOptions(options: GenerateOptions, entry: AutoRouteEntry): Genera
     messages: rewriteMessagesForTarget(options.messages, entry.provider),
     ...entry.effort === undefined ? {} : { reasoningEffort: ReasoningEffortId(entry.effort) },
     ...entry.userAgent === undefined ? {} : { accountHubUserAgent: entry.userAgent },
+    ...entry.originator === undefined ? {} : { accountHubOriginator: entry.originator },
   }
 }
 

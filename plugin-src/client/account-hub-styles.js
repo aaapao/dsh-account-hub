@@ -426,6 +426,20 @@ const STYLES = `
    min-width: 0 保证超长 UA 文本被裁在输入框里，而不是把整行顶开。 */
 .dim-ah-arEditorUaInput { box-sizing: border-box; flex: 1 1 auto; width: 100%; min-width: 0; }
 
+/* Originator 覆写行：与上面的 UA 行**同构**（label + 输入框 + 重置按钮一条 flex 行、
+   同一条 12px 节奏、label 复用 .dim-ah-arEditorLabel），故两条规则逐字对齐。
+   ⚠️ 仍然另起两个类名而不是复用 UA 那两个：两条通道是**彼此独立**的字段，共用一个
+   类名会让「只想调其中一行」的后续改动被迫同时改到另一行（例如某天 UA 行要加
+   monospace 字体，Originator 行不该被牵连）。同名复用省下的两行 CSS 抵不上这份耦合。
+   ⚠️ 语义差异（本行 placeholder 是固定一句「默认不发此头」而非现算的默认值）属于文案，
+   与盒模型无关，故布局不需要跟着不同。
+   ⚠️ 与 UA 行一样是**高级配置**，不进候选行摘要文本（见 .dim-ah-arEntryText）。 */
+.dim-ah-arEditorOriginatorRow { display: flex; align-items: center; gap: 12px; }
+/* 与 .dim-ah-arEditorUaInput 同因：className 落在 ui-primitives 的 wrapper span 上，
+   宿主全站没有通盘 box-sizing 重置，不显式声明 border-box 内容盒就会宽出 17px、
+   把右邻的重置按钮挤出弹窗；min-width: 0 保证超长值被裁在输入框里。 */
+.dim-ah-arEditorOriginatorInput { box-sizing: border-box; flex: 1 1 auto; width: 100%; min-width: 0; }
+
 /* 「添加模型」入口所在行。 */
 .dim-ah-arAddEntry { display: flex; align-items: center; gap: 8px; }
 

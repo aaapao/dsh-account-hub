@@ -61,6 +61,7 @@ import type {
   GenerateOptions, LlmModelInfo, LlmProviderInfo, LlmResolvedModelInfo, StreamChunk, TokenUsage,
 } from '@deepseek-ai/dsh-llm'
 import { accountHubUserAgentOf, applyAccountHubUserAgent } from './account-hub-user-agent.js'
+import { accountHubOriginatorOf, applyAccountHubOriginator } from './account-hub-originator.js'
 import { AccountPool, providerCatalogVisible } from './account-pool.js'
 import { availableContextTiers, effectiveContextWindow, type ContextTier } from './context-tiers.js'
 import type { LlmSettingsAddress } from './types.js'
@@ -2196,6 +2197,9 @@ export class QoderAdapter extends LlmAdapter {
     if (accountHubUserAgentOf(options) !== undefined) {
       console.warn('qoder-cn 走 wasm 签名链，UA 覆写暂不生效')
     }
+    if (accountHubOriginatorOf(options) !== undefined) {
+      console.warn('qoder-cn 走 wasm 签名链，Originator 覆写暂不生效')
+    }
     try {
       return await this.fetchImpl(prepared.url, {
         method: 'POST',
@@ -2271,6 +2275,8 @@ export class QoderAdapter extends LlmAdapter {
     // ⚠️ **本行只覆盖国际版**：CN 的 chat 一律走 wasm 签名路径（见
     // {@link QoderAdapter.sign} 的告警），压根到不了这里。
     applyAccountHubUserAgent(headers, options)
+    // Originator 同款（新增头，默认不发；没配则零变化）。同样只国际版可达。
+    applyAccountHubOriginator(headers, options)
     // chat 主机：**每次请求时**读 `QODER_MODEL_SERVER_HOST`（逃生阀语义 = 运行时可切，
     // 故不能在构造时缓存）。只覆盖 chat，openapi / models 两条控制面不受影响。
     const chatBase = resolveQoderChatBase(this.product.chatBase)

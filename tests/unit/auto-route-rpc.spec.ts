@@ -20,11 +20,17 @@ import { sanitizeAccountHubDocument } from '../../src/account-hub-storage.js'
 import { AUTO_ROUTE_PROVIDER_ID } from '../../src/auto-route.js'
 import type { AutoRouteDefinition } from '../../src/auto-route.js'
 
-/** 一份合法定义（`entries` 至少一条、provider 不自引用）。 */
+/**
+ * 一份合法定义（`entries` 至少一条、provider 不自引用）。
+ *
+ * ⚠️ 首条候选刻意带 `originator`：它是**新增头**通道的载荷（UA 那种「覆写既有头」
+ * 的字段在本文件里没有专属用例），带在常量上就能让本文件所有 `toEqual` 的往返
+ * 断言顺带覆盖「Originator 存得进去、读得回来、不被归一化吃掉」。
+ */
 const DEFINITION: AutoRouteDefinition = {
   id: 'def-1',
   name: 'fast-auto',
-  entries: [{ provider: 'buddy-cn', model: 'glm-5.3' }],
+  entries: [{ provider: 'buddy-cn', model: 'glm-5.3', originator: 'codearts-cli/1.0' }],
 }
 
 /** 第二份合法定义（用于「只传 models 不抹 enabled」等多定义场景）。 */
@@ -220,8 +226,40 @@ describe('autoroute.get / autoroute.set 端点', () => {
     const read = await h.call('autoroute.get', {})
     expect(read.value).toEqual({ enabled: false, models: [DEFINITION, SECOND_DEFINITION] })
     // effort 缺省时**不留键**（缺省 = 该模型默认档，与显式空串是两回事）。
+    // 配了的 `originator` 反过来必须**留键**（见下面那条专门的往返用例）。
     const entries = (read.value as { models: AutoRouteDefinition[] }).models[0]!.entries
-    expect(Object.keys(entries[0]!).sort()).toEqual(['model', 'provider'])
+    expect(Object.keys(entries[0]!).sort()).toEqual(['model', 'originator', 'provider'])
+  })
+
+  /**
+   * 头覆写字段的往返：`userAgent` 与 `originator` 都必须**原样读回**，且缺省不留键。
+   *
+   * ⚠️ 这条守的是「存得进去却发不出去」那一类静默断裂：两个字段在链路上有四处落点
+   * （RPC 入参 → 池校验 → 落盘 → 读回），任一处漏掉都会表现为「用户配了、界面上也
+   * 存了，出站却什么都没变」，且没有任何报错。故这里端到端跑一遍并逐字比对键集合。
+   */
+  it('set models → get 原样读回头覆写字段（userAgent / originator），缺省不留键', async () => {
+    const { h } = await setup()
+    const withOverrides: AutoRouteDefinition = {
+      id: 'def-ua-orig',
+      name: 'overridden-auto',
+      entries: [
+        { provider: 'buddy-cn', model: 'glm-5.3', userAgent: 'CustomAgent/1.0', originator: 'my-app' },
+        { provider: 'qoder', model: 'gfmodel' },
+      ],
+    }
+    const written = await h.call('autoroute.set', { models: [withOverrides] })
+    expect(written.ok).toBe(true)
+
+    const read = await h.call('autoroute.get', {})
+    expect(read.value).toEqual({ enabled: false, models: [withOverrides] })
+    const entries = (read.value as { models: AutoRouteDefinition[] }).models[0]!.entries
+    // 配了的条目：两个键都在，取值逐字保留。
+    expect(Object.keys(entries[0]!).sort()).toEqual(['model', 'originator', 'provider', 'userAgent'])
+    expect(entries[0]!.originator).toBe('my-app')
+    // 没配的条目：**一个键都不留**（缺省 = 不发 Originator 头 / 用默认 UA，
+    // 写成空串会让读路径把它当脏值丢掉，落盘 diff 也会出现无意义的噪声）。
+    expect(Object.keys(entries[1]!).sort()).toEqual(['model', 'provider'])
   })
 
   it('**部分更新**：只传 models 时 enabled 保留', async () => {

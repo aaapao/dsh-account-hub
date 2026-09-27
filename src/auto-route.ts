@@ -1,14 +1,15 @@
 /**
  * 「自动路由」——**本功能的唯一真相源**（纯逻辑：无 ctx、无 IO、零依赖既有运行时代码）。
  *
- * 唯一的外部 import 是 `./account-hub-user-agent.js` 的两个判据函数（同为零 IO 的
- * 纯逻辑）：候选条目的 `userAgent` 既是本文件的配置字段，又是那个模块要发出去的
- * HTTP 头值，合法性判据只能有一份 —— 抄两份必然分叉成「存得进去却发不出去」。
+ * 唯一的外部 import 是 `./account-hub-user-agent.js` 与 `./account-hub-originator.js`
+ * 的判据函数（同为零 IO 的纯逻辑）：候选条目的 `userAgent` / `originator` 既是本文件
+ * 的配置字段，又是那两个模块要发出去的 HTTP 头值，合法性判据只能有一份 —— 抄两份
+ * 必然分叉成「存得进去却发不出去」。
  *
  * ## 功能
  *
  * 用户在面板里定义若干**自动模型**，每个自动模型是一条**有序**的
- * `(provider, model, effort?, userAgent?)` 候选列表。插件把它们注册成一个虚拟 provider
+ * `(provider, model, effort?, userAgent?, originator?)` 候选列表。插件把它们注册成一个虚拟 provider
  * （id 固定为 {@link AUTO_ROUTE_PROVIDER_ID}），其模型列表 = 这些自动模型。
  * DSH 选中某个自动模型发起请求时，宿主按列表顺序取**队首**条目委派给真实
  * provider；**失败者被移到队尾**（跨请求持续），降级后新队首立刻顶替。
@@ -33,15 +34,16 @@
  * 故两者的合法判定都收敛到本文件里的 {@link readEntry} / {@link readDefinition}
  * 两个内部函数，不存在第二份名单。
  *
- * **一条刻意的例外**：`userAgent` 的脏值在读路径上**只丢字段、不丢条目**（见
- * {@link readEntry}）—— 写路径的空串 / 超长 / 含控制字符一律拒绝，但当它出现在
- * 磁盘上（手工编辑、旧版本残留）时，那条候选的 provider/model 明明是对的，为它
+ * **一条刻意的例外**：`userAgent` 与 `originator` 的脏值在读路径上**只丢字段、不丢
+ * 条目**（见 {@link readEntry}）—— 写路径的空串 / 超长 / 含控制字符一律拒绝，但当它
+ * 出现在磁盘上（手工编辑、旧版本残留）时，那条候选的 provider/model 明明是对的，为它
  * 一个可选字段丢掉整条候选（乃至让「满一圈」少试一个 provider）代价更大。
  *
  * @module dsh-account-hub/auto-route
  */
 
 import { accountHubUserAgentProblem, normalizeAccountHubUserAgent } from './account-hub-user-agent.js'
+import { accountHubOriginatorProblem, normalizeAccountHubOriginator } from './account-hub-originator.js'
 
 /**
  * 虚拟 provider 的固定 id。
@@ -160,17 +162,18 @@ export function autoRouteExhaustedMessage(name: string): string {
  *
  * 故比较**内容**，且只比较会影响队列的字段（`enabled` + 定义的身份与条目顺序）。
  *
- * `userAgent` 也算**影响出站行为**的字段：它改的是这条候选发出去的请求头，改了
- * 就必须重建（否则用户在面板里改了 UA、请求却仍按旧 UA 发，且没有任何提示）。
+ * `userAgent` 与 `originator` 也算**影响出站行为**的字段：它们改的是这条候选发出去
+ * 的请求头，改了就必须重建（否则用户在面板里改了 UA / Originator、请求却仍按旧值发，
+ * 且没有任何提示）。
  *
  * ## 为什么用 `JSON.stringify`
  *
  * 键序稳定：输入来自 {@link sanitizeAutoRouteConfig}，它按固定字段顺序新建对象
- * （`{provider, model}` / `{provider, model, effort}` / 带 `userAgent` 的形态都是
- * 显式字面量）。`effort` 与 `userAgent` 的缺省都写成 `null` 占位 —— `undefined`
- * 会被 `JSON.stringify` 整键丢弃，从而与「键存在但值为 undefined」混为一谈，
- * 而两者在本配置里是不同语义（前者 = 该模型默认档 / 用 provider 默认 UA，
- * 后者非法且已被读路径丢弃）。
+ * （`{provider, model}` / `{provider, model, effort}` / 带 `userAgent` / `originator`
+ * 的形态都是显式字面量）。`effort` / `userAgent` / `originator` 的缺省都写成 `null`
+ * 占位 —— `undefined` 会被 `JSON.stringify` 整键丢弃，从而与「键存在但值为 undefined」
+ * 混为一谈，而两者在本配置里是不同语义（前者 = 该模型默认档 / 用 provider 默认 UA /
+ * 不发 Originator 头，后者非法且已被读路径丢弃）。
  *
  * 返回值是**不透明字符串**，只应用于相等比较，不要解析它。
  */
@@ -185,6 +188,7 @@ export function autoRouteConfigFacts(config: AutoRouteConfig): string {
         entry.model,
         entry.effort ?? null,
         entry.userAgent ?? null,
+        entry.originator ?? null,
       ]),
     ]),
   ])
@@ -299,6 +303,25 @@ export interface AutoRouteEntry {
    * **一个字节都不变** —— 这条通道的存在不得改变任何既有出站形态。
    */
   userAgent?: string
+  /**
+   * `Originator` 头覆写；**缺省 = 一个头都不发**（与 `userAgent` 的缺省语义不同，见下）。
+   *
+   * ## 与 `userAgent` 的根本差别：这是**新增头**，不是「覆写既有头」
+   *
+   * `Originator` 在七家上游协议里**都不存在**（全仓零命中），所以没有「默认值」可言：
+   * 字段缺席时出站请求与加这条通道之前**逐字节一致**（一个头都不发），只有用户显式
+   * 配了值，这个头才会第一次出现在请求上。面板上的占位文案据此写成「默认不发此头」，
+   * 而不是显示一个并不存在的默认值（`autoroute.model-info` 也不为它提供任何字段）。
+   *
+   * 与 `userAgent` 同级：它同样在**条目**上，因为一条候选 = 一次具体的出站请求。
+   *
+   * ## 取值纪律
+   *
+   * 它是该次请求 `Originator` 头的**整体取值**（见 `src/account-hub-originator.ts`）。
+   * 合法性判据（非空、≤ 512 字符、无换行与控制字符）在那边有一份唯一真相源，本文件
+   * 只引用不重写。
+   */
+  originator?: string
 }
 
 /** 一个「自动模型」：暴露给 DSH 的一个模型 + 它背后的有序候选列表。 */
@@ -356,20 +379,27 @@ function readText(raw: unknown): string | null {
  * 非法形态（与写路径判据**同源**）：非对象、`provider` / `model` 空或非字符串、
  * `provider` 等于 {@link AUTO_ROUTE_PROVIDER_ID}（自引用）、`effort` 存在但为空串。
  *
- * ## `userAgent` 是上述「丢整条」规则的**唯一例外**
+ * ## 两个头覆写字段（`userAgent` / `originator`）是上述「丢整条」规则的**例外**
  *
- * 它坏掉时只丢**这个字段**，条目照留：`provider` / `model` 才是这条候选的实质，
+ * 它们坏掉时只丢**那个字段**，条目照留：`provider` / `model` 才是这条候选的实质，
  * 为一个可选的头覆写把整条候选从降级队列里抹掉（用户看到的是「我明明有三条候选，
  * 只试了两个就说全不可用」）代价明显更大。且判据与写路径共用一份
- * （{@link normalizeAccountHubUserAgent}）—— 这里只是把「非法」的处置从「拒绝」
- * 换成「当没配」，绝不会放一个非法值到出站头上去。
+ * （{@link normalizeAccountHubUserAgent} / {@link normalizeAccountHubOriginator}）——
+ * 这里只是把「非法」的处置从「拒绝」换成「当没配」，绝不会放一个非法值到出站头上去。
  *
- * 归一后**不落空串**：`''` 与「键不存在」都是「用该 provider 默认 UA」，两种形态
- * 存成两种样子只会让 `Object.keys` 的断言与落盘 diff 出现无意义的噪声。
+ * 归一后**不落空串**：`''` 与「键不存在」在 UA 上都表示「用该 provider 默认 UA」、
+ * 在 Originator 上都表示「不发这个头」，两种形态存成两种样子只会让 `Object.keys`
+ * 的断言与落盘 diff 出现无意义的噪声。
  */
 function readEntry(raw: unknown): AutoRouteEntry | null {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null
-  const value = raw as { provider?: unknown; model?: unknown; effort?: unknown; userAgent?: unknown }
+  const value = raw as {
+    provider?: unknown
+    model?: unknown
+    effort?: unknown
+    userAgent?: unknown
+    originator?: unknown
+  }
   const provider = readText(value.provider)
   const model = readText(value.model)
   if (provider === null || model === null) return null
@@ -378,29 +408,39 @@ function readEntry(raw: unknown): AutoRouteEntry | null {
     ? undefined
     : normalizeAccountHubUserAgent(value.userAgent)
   const withUserAgent = userAgent === undefined ? {} : { userAgent }
-  if (value.effort === undefined) return { provider, model, ...withUserAgent }
+  const originator = value.originator === undefined
+    ? undefined
+    : normalizeAccountHubOriginator(value.originator)
+  const withOriginator = originator === undefined ? {} : { originator }
+  const headers = { ...withUserAgent, ...withOriginator }
+  if (value.effort === undefined) return { provider, model, ...headers }
   const effort = readText(value.effort)
   if (effort === null) return null
-  return { provider, model, effort, ...withUserAgent }
+  return { provider, model, effort, ...headers }
 }
 
 /**
  * 条目身份键（用于同定义内的去重）：`provider` + `model` + `effort` + `userAgent`
- * （两个缺省各用空串占位）。
+ * + `originator`（三个缺省各用空串占位）。
  *
  * ⚠️ **`userAgent` 必须进键**：同 provider + 同模型 + 同档位、只有 UA 不同的两条候选
  * 是**两条真实不同的出站请求**（后台按 UA 归因，用户就是靠它把同一模型分成两条通道的）。
  * 不进键的话，读盘时第二条会被当「重复条目」静默合并掉 —— 用户加了第二条、界面显示
  * 保存成功，实际只剩一条，且没有任何报错。
+ *
+ * `originator` 同因进键（进键方式与 `userAgent` 逐字对齐）：它同样是**出站请求头**的
+ * 取值，两条只有它不同的候选也是两条不同的请求。差别只在语义 —— UA 是换掉一个既有的
+ * 头、它默认用该 provider 的值；`originator` 是新增一个头、默认一个都不发（见
+ * {@link AutoRouteEntry.originator}），但「进不进键」的判据与缺省无关。
  */
 function entryKey(entry: AutoRouteEntry): string {
-  return `${entry.provider}\u0000${entry.model}\u0000${entry.effort ?? ''}\u0000${entry.userAgent ?? ''}`
+  return `${entry.provider}\u0000${entry.model}\u0000${entry.effort ?? ''}\u0000${entry.userAgent ?? ''}\u0000${entry.originator ?? ''}`
 }
 
 /**
  * 读取一份有序候选列表：逐条过滤非法条目，并丢弃**完全同形**的重复条目（保留先出现的）。
  *
- * 重复条目没有意义（同一 provider + 模型 + 档位 + UA 试两次，第二次必然同样失败），
+ * 重复条目没有意义（同一 provider + 模型 + 档位 + 头覆写全同，试两次第二次必然同样失败），
  * 但它会**虚增 {@link autoRouteEntryCount}** —— 于是「满一圈」的判据被拉长，
  * 用户看到的是「明明只有两条候选，却转了三圈才报不可用」。故在读入处就去重。
  */
@@ -451,8 +491,8 @@ function readDefinition(raw: unknown): AutoRouteDefinition | null {
  * | `name` 跨定义重复 | 保留第一个，丢弃后来者 |
  * | 定义 `id` 重复 | 保留第一个，丢弃后来者 |
  * | 条目非法（`provider`/`model` 空、自引用、`effort` 空串） | 丢弃该条目 |
- * | 条目 `userAgent` 非法（非字符串 / 空串 / 超长 / 含控制字符） | **只丢该字段**，条目照留（见 {@link readEntry}） |
- * | 同定义内条目完全同形（provider + model + effort + userAgent 全同） | 保留第一个，丢弃后来者 |
+ * | 条目 `userAgent` / `originator` 非法（非字符串 / 空串 / 超长 / 含控制字符） | **只丢该字段**，条目照留（见 {@link readEntry}） |
+ * | 同定义内条目完全同形（provider + model + effort + userAgent + originator 全同） | 保留第一个，丢弃后来者 |
  *
  * 返回**全新对象**（定义、条目逐层新建），调用方改返回值不会串到输入，反之亦然。
  */
@@ -491,9 +531,9 @@ export function sanitizeAutoRouteConfig(raw: unknown): AutoRouteConfig {
  * 两条刻意的例外：
  * 1. **`enabled` 缺省视为 `false` 可接受**（部分更新语义：客户端只提交 `models`
  *    时不该被迫回传开关）；
- * 2. **`userAgent` 坏掉时**：读路径只丢该字段、写路径**整条拒绝** —— 用户手打的值
- *    必须当场拿到「哪里不对」的中文原因，而不是保存成功后悄悄变成没配（见
- *    {@link readEntry} 的说明）。
+ * 2. **`userAgent` / `originator` 坏掉时**：读路径只丢该字段、写路径**整条拒绝** ——
+ *    用户手打的值必须当场拿到「哪里不对」的中文原因，而不是保存成功后悄悄变成没配
+ *    （见 {@link readEntry} 的说明）。
  *
  * 错误消息一律中文并指明「哪个定义 / 哪个字段」。
  */
@@ -533,7 +573,13 @@ export function assertValidAutoRouteConfig(config: unknown): void {
       if (typeof rawEntry !== 'object' || rawEntry === null || Array.isArray(rawEntry)) {
         throw new Error(`${entryPosition}不是对象（收到 ${describe(rawEntry)}）`)
       }
-      const rawValue = rawEntry as { provider?: unknown; model?: unknown; effort?: unknown; userAgent?: unknown }
+      const rawValue = rawEntry as {
+        provider?: unknown
+        model?: unknown
+        effort?: unknown
+        userAgent?: unknown
+        originator?: unknown
+      }
       if (readText(rawValue.provider) === null) {
         throw new Error(`${entryPosition}缺少 provider（必须是非空字符串）`)
       }
@@ -554,6 +600,13 @@ export function assertValidAutoRouteConfig(config: unknown): void {
         const problem = accountHubUserAgentProblem(rawValue.userAgent)
         if (problem !== null) {
           throw new Error(`${entryPosition}的 userAgent ${problem}`)
+        }
+      }
+      if (rawValue.originator !== undefined) {
+        // 同款：判据来自 `src/account-hub-originator.ts`，文案形态与上面 userAgent 逐字对齐。
+        const problem = accountHubOriginatorProblem(rawValue.originator)
+        if (problem !== null) {
+          throw new Error(`${entryPosition}的 originator ${problem}`)
         }
       }
       const entry = readEntry(rawEntry)

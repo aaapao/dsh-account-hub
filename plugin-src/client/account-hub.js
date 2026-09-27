@@ -2316,6 +2316,20 @@ const AUTO_ROUTE_DEFAULT_EFFORT_LABEL = '默认';
  */
 const AUTO_ROUTE_UA_UNKNOWN_PLACEHOLDER = '该供应商无已知默认 UA';
 
+/**
+ * Originator 覆写行的占位文案。
+ *
+ * ⚠️ 与 UA 行的本质差异：**这里没有「默认值」可显示**。`Originator` 在七家上游
+ * 协议里都不存在（全仓零命中），各家默认就是**不发这个头** —— 故占位是一句固定
+ * 说明，而不是从 `autoroute.model-info` 现算出来的值（那个接口也不为它提供任何
+ * 字段：`defaultOriginator` 是个不存在的概念，服务端刻意没有这个字段）。
+ *
+ * 这与 UA 行的差别是刻意的、也是本行唯一「不能照抄 UA 行」的地方：UA 行的 placeholder
+ * 随 provider 变化（回答「不改的话会是什么」），本行的 placeholder 恒为同一句
+ * （回答「不改的话什么都不会发生」）。
+ */
+const AUTO_ROUTE_ORIGINATOR_PLACEHOLDER = '默认不发此头';
+
 /** 自动模型定义 id 的自增种子（与时间戳一起保证同一次会话内不重复）。 */
 let autoRouteIdSeed = 0;
 
@@ -2484,22 +2498,28 @@ function AutoRouteEntryRow({
 }
 
 /**
- * 候选编辑弹窗：供应商 / 模型 / 思考程度三行下拉，下面再挂一行 User-Agent 覆写。
- * 下拉复用 AutoRouteSelect，UA 行用 ui-primitives 的 Input 加一枚重置按钮。
+ * 候选编辑弹窗：供应商 / 模型 / 思考程度三行下拉，下面再挂 User-Agent 与 Originator
+ * 两行覆写。下拉复用 AutoRouteSelect，两个覆写行用 ui-primitives 的 Input 加一枚重置按钮。
  *
  * 弹窗只负责挂载控件；草稿唯一所有者仍是 AutoRoutePanel，选中动作直接回调面板的
  * onSelectField，因此级联清空、修改即保存、默认档哨兵值都沿用原有写路径。
  *
- * ## User-Agent 行（高级配置）
+ * ## 两行覆写（高级配置）：User-Agent 与 Originator
  *
- * 每条候选可覆写**仅 User-Agent 一个头**：值非空 = 该候选发出的请求带这个 UA，
- * 值为空 = 用默认（服务端按 provider 注入它自己那份）。placeholder 是**只读提示**，
- * 显示该 provider+model 当前真实发出的 UA（来自 `autoroute.model-info` 的
- * `defaultUserAgent`），故用户在下手之前就知道「不改的话会是什么」。
+ * 两条通道**同构但语义不同**，故下面两行的 placeholder 处理也不同：
  *
- * ⚠️ UA **不进候选行摘要**（`.dim-ah-arEntryText`）：行文本回答的是「这条候选长
- * 什么样」（模型(档位)-供应商）。UA 是少数人才动的伪装项，混进摘要会把每行都撑长，
- * 而它对「这条候选会走哪个模型」没有半点信息量。
+ * - **User-Agent**：值非空 = 该候选发出的请求带这个 UA，值为空 = 用默认（服务端按
+ *   provider 注入它自己那份）。placeholder 是**只读提示**，显示该 provider+model 当前
+ *   真实发出的 UA（来自 `autoroute.model-info` 的 `defaultUserAgent`），故用户在下手
+ *   之前就知道「不改的话会是什么」。
+ * - **Originator**：值非空 = 该候选发出的请求**新增**这个头，值为空 = **一个头都不发**。
+ *   `Originator` 在七家上游协议里都不存在，**没有「默认值」这个概念**，故 placeholder
+ *   是一句固定说明（{@link AUTO_ROUTE_ORIGINATOR_PLACEHOLDER}）而不是现算值 ——
+ *   `autoroute.model-info` 也刻意不为它提供任何字段（服务端没有 `defaultOriginator`）。
+ *
+ * ⚠️ 两个覆写字段都**不进候选行摘要**（`.dim-ah-arEntryText`）：行文本回答的是「这条
+ * 候选长什么样」（模型(档位)-供应商）。它们是少数人才动的伪装项，混进摘要会把每行都
+ * 撑长，而对「这条候选会走哪个模型」没有半点信息量。
  */
 function AutoRouteEntryEditor({ entry, index, catalog, effortInfo, busy, onSelectField, onClose }) {
   const providerGroup = catalog.find(group => group.id === entry.provider);
@@ -2537,6 +2557,19 @@ function AutoRouteEntryEditor({ entry, index, catalog, effortInfo, busy, onSelec
     ? effortInfo.defaultUserAgent
     : '';
   const uaPlaceholder = defaultUserAgent !== '' ? defaultUserAgent : AUTO_ROUTE_UA_UNKNOWN_PLACEHOLDER;
+  /**
+   * Originator 行的取值与占位。
+   *
+   * - 非空串 = **已覆写**（重置按钮可点，点了把键摘掉即回默认）；
+   * - 空串 / 缺省 = **不发这个头**（无可重置，按钮禁用）。
+   *
+   * ⚠️ 与 UA 行**唯一不能照抄**的地方：placeholder 是**固定一句**
+   * （{@link AUTO_ROUTE_ORIGINATOR_PLACEHOLDER}），**不读 `effortInfo`** ——
+   * `Originator` 在七家上游协议里都不存在，没有「默认值」可显示，服务端也就刻意
+   * 不为它提供任何字段（没有 `defaultOriginator`）。照 UA 行那样去读一个不存在的
+   * 字段，只会让 placeholder 恒为空串（界面上是一个没有任何提示的空白框）。
+   */
+  const originator = typeof entry.originator === 'string' ? entry.originator : '';
   const fieldRow = (label, select) => React.createElement('div', { className: 'dim-ah-arEditorRow' },
     React.createElement('span', { className: 'dim-ah-arEditorLabel' }, label),
     select);
@@ -2599,6 +2632,30 @@ function AutoRouteEntryEditor({ entry, index, catalog, effortInfo, busy, onSelec
           // 未覆写时无处可重置（值已经是默认）：禁用，而不是点了没反应。
           disabled: busy || userAgent === '',
           onClick: () => onSelectField('userAgent', ''),
+        }, '⟲')),
+      // 第五行：Originator 覆写（结构逐字对齐上面的 UA 行，布局见 .dim-ah-arEditorOriginatorRow）。
+      // ⚠️ 唯一实质差异在 placeholder：它是**固定一句**「默认不发此头」，不读 effortInfo ——
+      // 这个头在七家上游协议里都不存在，没有默认值可显示（见 AUTO_ROUTE_ORIGINATOR_PLACEHOLDER）。
+      React.createElement('div', { className: 'dim-ah-arEditorOriginatorRow' },
+        React.createElement('span', { className: 'dim-ah-arEditorLabel' }, 'Originator'),
+        React.createElement(Input, {
+          className: 'dim-ah-arEditorOriginatorInput',
+          value: originator,
+          disabled: busy,
+          // 可读名走 aria-label（与 UA 行同因：placeholder 是提示，不能拿它当字段名）。
+          'aria-label': 'Originator',
+          placeholder: AUTO_ROUTE_ORIGINATOR_PLACEHOLDER,
+          // 空串 = 清字段（setEntryField 把键摘掉）= 回默认不发，故「清空输入框」与「点重置」同义。
+          onChange: (event) => onSelectField('originator', event?.target?.value ?? ''),
+        }),
+        React.createElement(Button, {
+          variant: 'ghost',
+          size: 'sm',
+          className: 'dim-ah-iconBtn',
+          'aria-label': '重置 Originator',
+          // 未覆写时无处可重置（本来就不发这个头）：禁用，而不是点了没反应。
+          disabled: busy || originator === '',
+          onClick: () => onSelectField('originator', ''),
         }, '⟲'))));
 }
 
@@ -2873,9 +2930,12 @@ function AutoRoutePanel({ rpcCall }) {
    * 改一条候选的某一级：换供应商/模型都要清掉下游取值（旧值属于上一级）。
    *
    * ⚠️ 供应商 / 模型这两级是**上游**，改它们顺带清下游是刻意的（旧的 model / effort
-   * 属于上一个供应商，留着就是非法配置）。而 `effort` 与 `userAgent` 是**同级**的
-   * 两个可选字段：改一个绝不能把另一个冲掉 —— 这正是下面两处走「展开再摘键」而不是
-   * 「按已知字段重建对象」的原因（重建一次就会静默抹掉另一个）。
+   * 属于上一个供应商，留着就是非法配置）。而 `effort` / `userAgent` / `originator` 是
+   * **同级**的三个可选字段：改一个绝不能把另外两个冲掉 —— 这正是下面几处走「展开再摘键」
+   * 而不是「按已知字段重建对象」的原因（重建一次就会静默抹掉另外两个）。
+   *
+   * ⚠️ 两个头覆写字段**不参与级联清空**：换供应商 / 模型只清 `effort`（它属于上一级），
+   * UA 与 originator 是用户手打的伪装值，与走哪个模型无关，跟着清掉等于替用户丢配置。
    */
   const setEntryField = (defId, index, field, value) => {
     editDraft(prev => prev.map(def => {

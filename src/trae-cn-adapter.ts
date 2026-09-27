@@ -35,6 +35,7 @@ import type {
   GenerateOptions, LlmModelInfo, LlmProviderInfo, LlmResolvedModelInfo, StreamChunk,
 } from '@deepseek-ai/dsh-llm'
 import { applyAccountHubUserAgent } from './account-hub-user-agent.js'
+import { applyAccountHubOriginator } from './account-hub-originator.js'
 import { AccountPool, providerCatalogVisible } from './account-pool.js'
 import type { LlmSettingsAddress } from './types.js'
 import { isTraeCnExpired } from './trae-cn-oauth.js'
@@ -978,6 +979,11 @@ export class TraeCnAdapter extends LlmAdapter {
     // （`user-agent` 之类）再写 `User-Agent`，避免同一次请求出现两个 UA 头。
     // 载荷与判据的唯一来源是 `src/account-hub-user-agent.ts`。
     applyAccountHubUserAgent(headers, options)
+    // Originator 通道（第二条覆写通道，与 UA 同构）：**新增**一个头，trae-cn 协议
+    // 里本就不存在 `Originator`，没配则一个字节都不发。本对象是**普通对象**，
+    // helper 同样会先清掉异形键（`originator` 之类）再写 `Originator`。
+    // 载荷与判据在 `src/account-hub-originator.ts`。
+    applyAccountHubOriginator(headers, options)
     try {
       // **SOLO 通道**（`/api/agent/v3/llm_utils_chat`）打在 IDE 网关上，
       // 而不是 `product.apiBase`（见 TRAE_CN_CHAT_PATH 的迁移说明）。

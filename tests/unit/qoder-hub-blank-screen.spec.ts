@@ -868,6 +868,41 @@ describe('控件与样式迁移（源码级通盘闸门）', () => {
       .toContain("onSelectField('userAgent', '')")
   })
 
+  /**
+   * 真机功能锚点：候选编辑弹窗的「Originator 覆写」行（与 UA 行同构的第二条覆写通道）。
+   *
+   * 三条判据逐条对齐上面那条 UA 用例，各防一种回归：
+   * 1. Originator 行存在且走 Input 原语（aria-label 'Originator'）—— 防整行被当装饰删掉；
+   * 2. 重置按钮存在（aria-label '重置 Originator'）且**未覆写时禁用**
+   *    （originator === ''）：本来就不发这个头，点了没反应的按钮必须不可点；
+   * 3. 占位文案是**固定一句**「默认不发此头」—— 这是本行与 UA 行唯一不能照抄的地方：
+   *    `Originator` 在七家上游协议里都不存在，**没有默认值可显示**，服务端也就刻意
+   *    不为它提供任何字段（没有 `defaultOriginator`）。照 UA 行那样去读 `defaultUserAgent`
+   *    只会让 placeholder 恒为空串（界面上是一个没有任何提示的空白框）。
+   */
+  it('候选编辑弹窗有 Originator 覆写行：Input + 重置按钮（未覆写时禁用）+ 固定占位', () => {
+    expect(clientCode).toContain("'aria-label': 'Originator'")
+    expect(clientCode).toContain("'aria-label': '重置 Originator'")
+    expect(clientCode).toContain('AUTO_ROUTE_ORIGINATOR_PLACEHOLDER')
+    // 占位常量必须是那句固定说明本身，而不是任何现算值。
+    const constantAt = clientCode.indexOf('const AUTO_ROUTE_ORIGINATOR_PLACEHOLDER =')
+    expect(constantAt, '找不到 AUTO_ROUTE_ORIGINATOR_PLACEHOLDER 的定义').toBeGreaterThan(-1)
+    const constantLine = clientCode.slice(constantAt, clientCode.indexOf(';', constantAt))
+    expect(constantLine, '占位必须是「默认不发此头」这句固定说明').toContain('默认不发此头')
+    // ⚠️ 反向断言：本行的 placeholder **不得**引用 defaultUserAgent —— 那个字段不存在，
+    // 引用它等于把 placeholder 变成恒空串（照抄 UA 行最容易犯的错）。
+    const inputAt = clientCode.indexOf("'aria-label': 'Originator'")
+    const inputBlock = clientCode.slice(inputAt, clientCode.indexOf('重置 Originator', inputAt))
+    expect(inputBlock, 'Originator 行的 placeholder 只能取固定常量，不得读 UA 的默认值链路')
+      .not.toContain('defaultUserAgent')
+    expect(inputBlock).toContain('AUTO_ROUTE_ORIGINATOR_PLACEHOLDER')
+    // 重置 = 清键（回到「不发这个头」），不是把输入框填成某个值。
+    const resetAt = clientCode.indexOf("'aria-label': '重置 Originator'")
+    const resetBody = clientCode.slice(resetAt, clientCode.indexOf('⟲', resetAt))
+    expect(resetBody, '重置按钮必须把 originator 置空（清覆写键）')
+      .toContain("onSelectField('originator', '')")
+  })
+
   it('按钮与拖拽手柄 Tooltip 按清单精简，其余提示保留', () => {
     expect(clientCode).toContain("'aria-label': '模型列表'")
     expect(clientCode).toContain("'aria-label': '刷新积分'")

@@ -269,6 +269,85 @@ describe('assertValidAutoRouteConfig：写路径非法即抛（判据与 sanitiz
       models: [def('m1', '坏掉的', [entry('auto-route', 'x')])],
     })).toThrow(/坏掉的/)
   })
+
+  /**
+   * 头覆写字段（`userAgent` / `originator`）的写路径判据。
+   *
+   * ⚠️ 与其它字段的**关键差别**：这两个字段坏掉时读路径只丢字段、写路径整条拒绝
+   * （见 {@link readEntry} 的说明）—— 用户手打的值必须当场拿到中文原因，而不是
+   * 保存成功后悄悄变成没配。故这里两条路径各测一遍，且都要求消息点名到**条目位置**。
+   */
+  it('条目头覆写字段非法（空串 / 非字符串 / 超长 / 控制字符）→ 抛错并点名条目与字段', () => {
+    const withOverride = (originator: unknown): unknown =>
+      ({ models: [{ id: 'm1', name: 'A', entries: [{ provider: 'dsh', model: 'x', originator }] }] })
+    // 空串：缺省就表示「不发这个头」，不需要用空串表达。
+    expect(() => assertValidAutoRouteConfig(withOverride(''))).toThrow(/第 1 个条目.*originator.*不能为空串/)
+    expect(() => assertValidAutoRouteConfig(withOverride(42))).toThrow(/originator.*必须是字符串/)
+    expect(() => assertValidAutoRouteConfig(withOverride('x'.repeat(513)))).toThrow(/originator.*过长/)
+    expect(() => assertValidAutoRouteConfig(withOverride('a\nb'))).toThrow(/originator.*控制字符/)
+    // 反向锚点：合法值放行（否则上面四条在「这个字段一律拒绝」时也成立）。
+    expect(() => assertValidAutoRouteConfig(withOverride('my-app'))).not.toThrow()
+    // 两端空白由判据自己归一，不构成非法。
+    expect(() => assertValidAutoRouteConfig(withOverride('  my-app  '))).not.toThrow()
+  })
+})
+
+/**
+ * 两个头覆写字段的**读路径**处置：坏值只丢那个字段，条目照留。
+ *
+ * 这是「丢整条」规则唯一的例外，理由见 `src/auto-route.ts` 里 {@link readEntry} 的
+ * 说明：为一个可选的头覆写把整条候选从降级队列里抹掉，代价明显更大（用户看到的是
+ * 「我明明有三条候选，只试了两个就说全不可用」）。
+ */
+describe('sanitizeAutoRouteConfig：头覆写字段坏掉时只丢字段、不丢条目', () => {
+  const readOne = (entryValue: unknown): Record<string, unknown> => {
+    const result = sanitizeAutoRouteConfig({
+      models: [{ id: 'm1', name: 'A', entries: [entryValue] }],
+    })
+    expect(result.models, '条目本身必须留下（这正是与其它字段的差别）').toHaveLength(1)
+    return result.models[0].entries[0] as Record<string, unknown>
+  }
+
+  it('合法 originator 读回归一值（两端空白被裁掉）', () => {
+    const read = readOne({ provider: 'dsh', model: 'x', originator: '  my-app  ' })
+    expect(read.originator).toBe('my-app')
+  })
+
+  it('非法 originator（空串 / 非字符串 / 超长 / 控制字符）→ 只丢该字段，条目照留', () => {
+    for (const bad of ['', '   ', 42, null, {}, 'x'.repeat(513), 'a\nb', 'a\rb']) {
+      const read = readOne({ provider: 'dsh', model: 'x', originator: bad })
+      expect(read.provider, 'provider / model 才是这条候选的实质，必须留下').toBe('dsh')
+      expect(read.model).toBe('x')
+      // 归一后**不落空串**：'键不存在' 才是「不发这个头」的唯一形态。
+      expect('originator' in read, `非法值 ${JSON.stringify(bad)} 不得落成任何形态`).toBe(false)
+    }
+  })
+
+  it('userAgent 与 originator 彼此独立：一个坏掉不牵连另一个', () => {
+    const read = readOne({ provider: 'dsh', model: 'x', userAgent: 'CustomAgent/1.0', originator: '' })
+    expect(read.userAgent, 'originator 坏掉不该动 userAgent').toBe('CustomAgent/1.0')
+    expect('originator' in read).toBe(false)
+  })
+
+  it('两条只有 originator 不同的候选**都留下**（身份键必须含该字段）', () => {
+    // ⚠️ 不进键的话第二条会被当「重复条目」静默合并：用户加了第二条、界面显示保存
+    // 成功，实际只剩一条，且没有任何报错。
+    const result = sanitizeAutoRouteConfig({
+      models: [{
+        id: 'm1',
+        name: 'A',
+        entries: [
+          { provider: 'dsh', model: 'x' },
+          { provider: 'dsh', model: 'x', originator: 'app-a' },
+          { provider: 'dsh', model: 'x', originator: 'app-b' },
+          { provider: 'dsh', model: 'x', originator: 'app-b' }, // 完全同形 → 丢
+        ],
+      }],
+    })
+    const entries = result.models[0].entries
+    expect(entries).toHaveLength(3)
+    expect(entries.map(item => item.originator)).toEqual([undefined, 'app-a', 'app-b'])
+  })
 })
 
 describe('运行时降级引擎：失败者移到队尾，新队首立刻顶替', () => {

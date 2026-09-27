@@ -18,6 +18,7 @@ import {
   ReasoningEffortId,
 } from '@deepseek-ai/dsh-llm'
 import { applyAccountHubUserAgent } from './account-hub-user-agent.js'
+import { applyAccountHubOriginator } from './account-hub-originator.js'
 import { AccountPool, providerCatalogVisible } from './account-pool.js'
 import { availableContextTiers, effectiveContextWindow, type ContextTier } from './context-tiers.js'
 import { isQuotaExhausted, isRateLimited, parseQuotaExhausted, parseRateLimitError } from './llm-adapter.js'
@@ -1219,6 +1220,10 @@ export class BuddyAdapter extends LlmAdapter {
     // 覆写只对**这一条候选**生效，`resolveUserAgent` 的默认值仍是所有非覆写请求
     // 的唯一来源 —— 通道的载荷与判据都在 `src/account-hub-user-agent.ts`。
     applyAccountHubUserAgent(headers, options)
+    // Originator 通道（第二条覆写通道，与 UA 同构）：**新增**一个头，`Originator`
+    // 在 buddy 系协议里本就不存在，没配则一个字节都不发。载荷与判据在
+    // `src/account-hub-originator.ts`。
+    applyAccountHubOriginator(headers, options)
     try {
       return await this.fetchImpl(`${this.product.endpoint}/v2/chat/completions`, {
         method: 'POST',

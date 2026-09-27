@@ -8,6 +8,7 @@ import type { GenerateOptions, LlmModelInfo, LlmProviderInfo, LlmResolvedModelIn
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import { AccountPool, providerCatalogVisible } from './account-pool.js'
 import { applyAccountHubUserAgent } from './account-hub-user-agent.js'
+import { applyAccountHubOriginator } from './account-hub-originator.js'
 import type { RemoteModel } from './models.js'
 import { isCodeArtsBenefitModel } from './models.js'
 import { signRequestHuawei } from './sign.js'
@@ -1107,6 +1108,11 @@ export class CodeArtsAdapter extends LlmAdapter {
       // `signRequestHuawei`），`user-agent` **不在 SignedHeaders 里** —— 故这里
       // 放在签名之后覆写，与服务端验签结果无关，不需要挪到 `signRequestHuawei` 之前。
       applyAccountHubUserAgent(headers, options)
+      // Originator 通道（第二条覆写通道，与 UA 同构）：**新增**一个头，CodeArts 协议
+      // 里本就不存在 `Originator`，没配则一个字节都不发。签名无关的理由同上 ——
+      // `originator` 同样不在 SDK-HMAC-SHA256 的 SignedHeaders 里，签名之后 set 安全。
+      // 载荷与判据在 `src/account-hub-originator.ts`。
+      applyAccountHubOriginator(headers, options)
 
       response = await this.fetchImpl(url, {
         method: 'POST',

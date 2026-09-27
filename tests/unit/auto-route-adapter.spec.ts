@@ -70,7 +70,9 @@ const config = (enabled: boolean, models: AutoRouteDefinition[]): AutoRouteConfi
 const def = (
   id: string,
   name: string,
-  entries: { provider: string; model: string; effort?: string }[],
+  // 两个头覆写字段也要能造出来：它们与 effort 一样**影响出站行为**，故同样必须进
+  // 内容指纹（见 autoRouteConfigFacts 那组用例）。
+  entries: { provider: string; model: string; effort?: string; userAgent?: string; originator?: string }[],
 ): AutoRouteDefinition => ({ id, name, entries })
 
 /** 目标模型能力（含思考档，用于测合并规则）。 */
@@ -1019,7 +1021,7 @@ describe('autoRouteConfigFacts：内容指纹的判据', () => {
     expect(autoRouteConfigFacts(build())).toBe(autoRouteConfigFacts(build()))
   })
 
-  it('开关 / 定义 id / 定义名 / 条目顺序 / effort 任一变化 → 指纹变化', () => {
+  it('开关 / 定义 id / 定义名 / 条目顺序 / effort / 两个头覆写 任一变化 → 指纹变化', () => {
     const base = config(true, [def('m1', '自动一号', [{ provider: 'p-a', model: 'a' }])])
     const variants = [
       config(false, [def('m1', '自动一号', [{ provider: 'p-a', model: 'a' }])]),
@@ -1028,6 +1030,10 @@ describe('autoRouteConfigFacts：内容指纹的判据', () => {
       config(true, [def('m1', '自动一号', [{ provider: 'p-b', model: 'a' }])]),
       config(true, [def('m1', '自动一号', [{ provider: 'p-a', model: 'b' }])]),
       config(true, [def('m1', '自动一号', [{ provider: 'p-a', model: 'a', effort: 'low' }])]),
+      // ⚠️ 两个头覆写字段也必须各自改变指纹：漏了它们，用户在面板里改了 UA / Originator
+      // 之后运行时**不会重建**，请求仍按旧值发出去 —— 界面显示已保存、出站却纹丝不动。
+      config(true, [def('m1', '自动一号', [{ provider: 'p-a', model: 'a', userAgent: 'Agent/1.0' }])]),
+      config(true, [def('m1', '自动一号', [{ provider: 'p-a', model: 'a', originator: 'my-app' }])]),
     ]
     for (const variant of variants) {
       expect(autoRouteConfigFacts(variant)).not.toBe(autoRouteConfigFacts(base))
