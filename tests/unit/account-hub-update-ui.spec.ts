@@ -376,6 +376,8 @@ interface UpdateRpcOptions {
   check?: (channel: string) => Promise<unknown>
   /** `update.apply` 的响应（省略即一次成功安装）。 */
   apply?: () => Promise<unknown>
+  /** `update.status` 的响应（省略即模拟安装阶段明细）。 */
+  status?: () => Promise<unknown>
 }
 
 /**
@@ -407,6 +409,11 @@ function makeUpdateRpc(options: UpdateRpcOptions = {}) {
       return options.apply
         ? await options.apply()
         : { previousSha: SHA_OLD, currentSha: SHA_NEW, currentVersion: LATEST_TAG }
+    }
+    if (method === 'update.status') {
+      return options.status
+        ? await options.status()
+        : { phase: 'installing', detail: '正在安装新版本…' }
     }
     return {}
   }
@@ -552,11 +559,11 @@ describe('页面级「检查更新 / 一键更新」（版本文本三态 + 通�
     expect(countOf(gatedCalls, 'update.apply'), '点击「更新」没有调用 update.apply').toBe(1)
     const applyCall = gatedCalls.find((call) => call.method === 'update.apply')!
     expect(applyCall.payload.channel, 'apply 应带当前通道 stable').toBe('stable')
-    expect(textsOf(applyingTree).join(''), '更新过程应显示在版本文本位').toContain('更新中')
+    expect(textsOf(applyingTree).join(''), '更新过程应显示在版本文本位').toContain('正在安装新版本…')
     gate.resolve({ previousSha: SHA_OLD, currentSha: SHA_NEW, currentVersion: LATEST_TAG })
   })
 
-  it('点「更新」：按钮转禁用「更新中…」，成功后显示「已更新到 <版本>，建议重启」', async () => {
+  it('点「更新」：按钮保持「更新」但禁用，成功后显示「已更新到 <版本>，建议重启」', async () => {
     const gate = deferred<{ previousSha: string; currentSha: string; currentVersion: string }>()
     const { rpcCall } = makeUpdateRpc({
       check: async () => ({
@@ -579,11 +586,11 @@ describe('页面级「检查更新 / 一键更新」（版本文本三态 + 通�
     // 「更新中」相位：请求还挂着，按钮必须原地转禁用态（不能是可重复点的入口）。
     const busyTree = await renderStable(client.AccountHubPage, { rpcCall }, client.hooks)
     const busy = findButtonByLabel(busyTree, '更新')
-    expect(busy, '点击后没有「更新中…」按钮').toBeDefined()
-    expect(busy!.props.disabled, '「更新中…」必须是禁用态').toBe(true)
-    expect(textsOf(busy!).join(''), '更新中按钮文案不对').toContain('更新中…')
-    expect(textsOf(versionTextOf(busyTree)!).join(''), '版本文本位应同步显示「更新中…」')
-      .toContain('更新中…')
+    expect(busy, '点击后没有「更新」按钮').toBeDefined()
+    expect(busy!.props.disabled, '安装中「更新」按钮必须是禁用态').toBe(true)
+    expect(textsOf(busy!).join(''), '安装中按钮文案必须保持「更新」').toBe('更新')
+    expect(textsOf(versionTextOf(busyTree)!).join(''), '版本文本位应显示安装阶段明细')
+      .toContain('正在安装新版本…')
 
     // 放行：成功态 —— 版本文本位变绿「已更新到 <版本>，建议重启」。
     gate.resolve({ previousSha: SHA_OLD, currentSha: SHA_NEW, currentVersion: LATEST_TAG })
@@ -591,6 +598,7 @@ describe('页面级「检查更新 / 一键更新」（版本文本三态 + 通�
     const doneText = textsOf(versionTextOf(doneTree)!).join('')
     expect(doneText, '成功后没有显示「已更新到 <版本>，建议重启」')
       .toContain(`已更新到 ${LATEST_TAG}，建议重启`)
+    expect(doneText, '更新完成后不应残留安装阶段明细').not.toContain('正在安装新版本…')
     expect(versionTextOf(doneTree)!.props['data-tone'], '成功态应是成功色').toBe('ok')
 
     // 成功后点击版本文本 → 弹新版本日志弹窗（applied 相位读检查缓存的 changelog）。
@@ -694,6 +702,10 @@ describe('页面级「检查更新 / 一键更新」（版本文本三态 + 通�
     // 切换即检查：update.check 立即带 channel: 'beta' 重发。
     const betaTree = await renderStable(client.AccountHubPage, { rpcCall }, client.hooks)
     expect(countOf(calls, 'update.check'), '切换通道后没有立即重新检查').toBe(2)
+    const channelButton = findButtonByLabel(betaTree, '更新通道')
+    expect(channelButton, '切换后通道锚点丢失').toBeDefined()
+    expect(channelButton!.props.className, '通道按钮必须使用自适应宽度样式')
+      .toContain('dim-ah-channelBtn')
     expect(lastCheckChannel(calls), '重新检查没有带 beta 通道').toBe('beta')
     // beta 有更新：版本文本显示「有更新 v0.2.0+3333333」（tag+短 sha 形态直显）。
     expect(textsOf(versionTextOf(betaTree)!).join(''), 'beta 有更新应显示 tag+短 sha 版本号')
@@ -733,8 +745,8 @@ describe('页面级「检查更新 / 一键更新」（版本文本三态 + 通�
     const tree = await renderStable(client.AccountHubPage, { rpcCall }, client.hooks)
     ;(findButtonByLabel(tree, '更新')!.props.onClick as () => void)()
     const applyingTree = await renderStable(client.AccountHubPage, { rpcCall }, client.hooks)
-    expect(textsOf(versionTextOf(applyingTree)!).join(''), '前置：点击后应进入「更新中」相位')
-      .toContain('更新中…')
+    expect(textsOf(versionTextOf(applyingTree)!).join(''), '前置：点击后应进入安装阶段明细')
+      .toContain('正在安装新版本…')
 
     // 「离开页面」：清组件槽位 —— 旧实例连同它的 state/effect 一并销毁。
     client.hooks.__resetStores()
@@ -742,11 +754,11 @@ describe('页面级「检查更新 / 一键更新」（版本文本三态 + 通�
     // 且不得再发 update.check（phase 非 idle ⇒ 挂载自动检查跳过）。
     const backTree = await renderStable(client.AccountHubPage, { rpcCall }, client.hooks)
     expect(countOf(calls, 'update.check'), '重挂载后不得再发 update.check（进度未丢时不重查）').toBe(1)
-    expect(textsOf(versionTextOf(backTree)!).join(''), '重挂载后「更新中」进度丢失')
-      .toContain('更新中…')
+    expect(textsOf(versionTextOf(backTree)!).join(''), '重挂载后安装阶段明细丢失')
+      .toContain('正在安装新版本…')
     const backBtn = findButtonByLabel(backTree, '更新')
     expect(backBtn, '重挂载后更新按钮丢失').toBeDefined()
-    expect(backBtn!.props.disabled, '重挂载后「更新中…」按钮必须是禁用态').toBe(true)
+    expect(backBtn!.props.disabled, '重挂载后安装中的更新按钮必须是禁用态').toBe(true)
 
     // apply 在页面外完成：相位照常推进到 applied（listener 已被 cleanup 摘除，
     // store 仍是真值），用户再回来时看到终态 —— 一次安装全程可见，无中间黑洞。

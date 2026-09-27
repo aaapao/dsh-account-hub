@@ -117,6 +117,7 @@ function makeDeps(options: {
   releaseBody?: string
   omitReleaseBody?: boolean
   headMessage?: string
+  currentCommitMessage?: string
   compareMessages?: string[]
   currentCompareMessages?: string[]
   recentMessages?: string[]
@@ -138,6 +139,7 @@ function makeDeps(options: {
   const headMessage = options.headMessage ?? 'Beta 提交标题\n更多提交说明'
   const compareMessages = options.compareMessages ?? ['Beta 改动\n提交正文']
   const currentCompareMessages = options.currentCompareMessages ?? ['当前领先提交\n提交正文']
+  const currentCommitMessage = options.currentCommitMessage ?? currentCompareMessages[0] ?? ''
   const recentMessages = options.recentMessages ?? ['master HEAD 提交\n提交正文']
   const files = new Map<string, string>([
     [LOCK_PATH, options.lockfile ?? makeLockfile(currentSha)],
@@ -162,6 +164,11 @@ function makeDeps(options: {
       return makeCommitResponse(latestTagSha, 'Release tag commit')
     }
     if (url === `${COMMIT_BY_REF_URL_PREFIX}master`) return makeCommitResponse(headSha, headMessage)
+    if (url.startsWith(COMMIT_BY_REF_URL_PREFIX)) {
+      const ref = decodeURIComponent(url.slice(COMMIT_BY_REF_URL_PREFIX.length))
+      if (ref === currentSha) return makeCommitResponse(currentSha, currentCommitMessage)
+      return makeCommitResponse(ref, '提交说明')
+    }
     if (url === `${COMMITS_URL}?per_page=20`) return makeCommitListResponse(recentMessages)
     if (url.startsWith(COMMIT_COMPARE_URL_PREFIX)) {
       const comparison = url.slice(COMMIT_COMPARE_URL_PREFIX.length).split('?', 1)[0]
@@ -322,12 +329,27 @@ describe('Account Hub 更新 RPC 逻辑', () => {
       currentVersion: `${LATEST_TAG}+${CURRENT_SHA.slice(0, 7)}`,
       latestVersion: `${LATEST_TAG}+${LATEST_SHA.slice(0, 7)}`,
       changelog: '- 新增功能\n- 修复问题',
-      currentChangelog: '',
+      currentChangelog: '- 当前领先提交',
     })
     expect(fetcher).toHaveBeenCalledWith(
       `${COMMIT_COMPARE_URL_PREFIX}${CURRENT_SHA}...master?per_page=20`,
       expect.any(Object),
     )
+  })
+
+  it('beta 无更新时 currentChangelog 包含当前 commit 提交信息', async () => {
+    const { deps } = makeDeps({
+      lockfile: makeLockfile(CURRENT_SHA),
+      currentSha: CURRENT_SHA,
+      latestTagSha: CURRENT_SHA,
+      headSha: CURRENT_SHA,
+      currentCommitMessage: '当前 beta 提交信息\n提交正文',
+    })
+
+    await expect(checkAccountHubUpdate(deps, 'beta')).resolves.toMatchObject({
+      hasUpdate: false,
+      currentChangelog: '- 当前 beta 提交信息',
+    })
   })
 
   it('beta currentSha 为空时从最近 20 条 commits 生成 changelog', async () => {
@@ -448,6 +470,31 @@ describe('Account Hub 更新 RPC 逻辑', () => {
       { cwd: PROFILE_ROOT, timeoutMs: 120_000 },
     )
     expect(fetcher).toHaveBeenCalledTimes(2)
+  })
+
+  it('apply 按 removing、installing、verifying 顺序上报阶段，并在无依赖时跳过 removing', async () => {
+    const progress: Array<[string, string]> = []
+    const { deps } = makeDeps()
+    await applyAccountHubUpdate(deps, 'stable', (phase, detail) => {
+      progress.push([phase, detail])
+    })
+    expect(progress).toEqual([
+      ['removing', '正在卸载旧版本…'],
+      ['installing', '正在安装新版本…'],
+      ['verifying', '正在验证安装…'],
+    ])
+
+    const noDependencyProgress: Array<[string, string]> = []
+    const noDependency = makeDeps({
+      packageJson: '{\n  "name": "fake-profile",\n  "private": true\n}\n',
+    })
+    await applyAccountHubUpdate(noDependency.deps, 'stable', (phase, detail) => {
+      noDependencyProgress.push([phase, detail])
+    })
+    expect(noDependencyProgress).toEqual([
+      ['installing', '正在安装新版本…'],
+      ['verifying', '正在验证安装…'],
+    ])
   })
 
   it('apply beta 通道按 master HEAD SHA 安装', async () => {
@@ -584,9 +631,14 @@ describe('Account Hub 更新 RPC 逻辑', () => {
       hasUpdate: false,
     })
 
+    const initialStatus = await call('update.status', {})
+    expect(initialStatus).toEqual({ ok: true, value: { phase: 'idle', detail: '' } })
+
     const betaApply = await call('update.apply', { channel: 'beta' })
     expect(betaApply.ok).toBe(true)
     expect(betaApply.value).toMatchObject({ currentSha: LATEST_SHA })
+    const finalStatus = await call('update.status', {})
+    expect(finalStatus).toEqual({ ok: true, value: { phase: 'applied', detail: '安装完成' } })
     expect(exec).toHaveBeenNthCalledWith(
       2,
       'pnpm',

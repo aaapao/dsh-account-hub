@@ -3,6 +3,11 @@
 import { join } from 'node:path'
 import type { RpcUpdateApplyResponse, RpcUpdateCheckResponse, RpcUpdateChannel } from './types.js'
 
+type AccountHubUpdateProgress = (
+  phase: 'removing' | 'installing' | 'verifying',
+  detail: string,
+) => void
+
 const RELEASES_LATEST_URL = 'https://api.github.com/repos/gurio-wine/dsh-account-hub/releases/latest'
 const COMMIT_BY_REF_URL_PREFIX = 'https://api.github.com/repos/gurio-wine/dsh-account-hub/commits/'
 const COMMIT_COMPARE_URL_PREFIX = 'https://api.github.com/repos/gurio-wine/dsh-account-hub/compare/'
@@ -258,14 +263,26 @@ export async function checkAccountHubUpdate(
       ? await fetchCommitChangelog(deps, `${COMMITS_URL}?per_page=20`, 'commits')
       : await fetchCommitChangelog(deps, compareCommitsUrl(currentSha, 'master'), 'compare')
 
-    if (currentSha !== '' && latest.release !== null) {
-      const releaseCommit = await fetchCommitByRef(deps, latest.release.tag)
-      if (currentSha !== releaseCommit.sha) {
-        currentChangelog = await fetchCommitChangelog(
-          deps,
-          compareCommitsUrl(releaseCommit.sha, currentSha),
-          'compare',
-        )
+    if (currentSha !== '') {
+      const currentCommit = await fetchCommitByRef(deps, currentSha)
+      const currentCommitTitle = firstCommitLine(currentCommit.message)
+      const currentCommitLine = currentCommitTitle.length > 0 ? `- ${currentCommitTitle}` : ''
+      if (latest.release !== null) {
+        const releaseCommit = await fetchCommitByRef(deps, latest.release.tag)
+        if (currentSha !== releaseCommit.sha) {
+          currentChangelog = await fetchCommitChangelog(
+            deps,
+            compareCommitsUrl(releaseCommit.sha, currentSha),
+            'compare',
+          )
+          if (currentCommitLine.length > 0 && !currentChangelog.split('\n').includes(currentCommitLine)) {
+            currentChangelog = [currentChangelog, currentCommitLine].filter((line) => line.length > 0).join('\n')
+          }
+        } else {
+          currentChangelog = currentCommitLine
+        }
+      } else {
+        currentChangelog = currentCommitLine
       }
     }
   }
@@ -355,6 +372,7 @@ export function appendAccountHubAllowBuild(dependenciesFile: string, sha: string
 export async function applyAccountHubUpdate(
   deps: AccountHubUpdateDeps,
   channel: RpcUpdateChannel = 'stable',
+  onProgress: AccountHubUpdateProgress = () => {},
 ): Promise<RpcUpdateApplyResponse> {
   const latest = await fetchLatestVersion(deps, channel)
   const lockPath = join(deps.profileRoot, 'pnpm-lock.yaml')
@@ -372,6 +390,7 @@ export async function applyAccountHubUpdate(
 
   let removeLog = ''
   if (hasAccountHubDependency) {
+    onProgress('removing', '正在卸载旧版本…')
     let removeOutput: AccountHubUpdateProcessOutput
     try {
       removeOutput = await deps.exec('pnpm', ['remove', 'dsh-account-hub'], execOptions)
@@ -388,6 +407,7 @@ export async function applyAccountHubUpdate(
   if (updatedWorkspace !== workspace) await deps.writeFile(workspacePath, updatedWorkspace)
 
   let addOutput: AccountHubUpdateProcessOutput
+  onProgress('installing', '正在安装新版本…')
   try {
     addOutput = await deps.exec(
       'pnpm',
@@ -400,6 +420,7 @@ export async function applyAccountHubUpdate(
   const log = joinInstallLogs(removeLog, formatInstallLog(addOutput))
 
   let currentSha: string
+  onProgress('verifying', '正在验证安装…')
   try {
     currentSha = extractAccountHubSha(await deps.readFile(lockPath))
   } catch (error) {

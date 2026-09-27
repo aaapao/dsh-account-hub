@@ -128,6 +128,7 @@ import type {
   RpcAutoRouteModelInfoResponse,
   RpcUpdateCheckResponse,
   RpcUpdateApplyResponse,
+  RpcUpdateStatusResponse,
   RpcUpdateChannel,
 } from './types.js'
 import { AUTO_ROUTE_PROVIDER_ID, type AutoRouteDefinition } from './auto-route.js'
@@ -182,6 +183,8 @@ export const CHECKIN_ELIGIBLE_PROVIDERS: ReadonlySet<string> = new Set([
  * - 面板单发被挡 → `RpcCheckinPerformResponse.busy = true` + 空 results/summary。
  */
 export let checkinBusy = false
+
+let accountHubApplyProgress: RpcUpdateStatusResponse = { phase: 'idle', detail: '' }
 
 /** 重置签到互斥（仅测试用）。 */
 export function __resetCheckinBusy(): void {
@@ -1973,9 +1976,26 @@ function registerAccountHubEndpoints(options: AccountHubRpcOptions): void {
       case 'update.apply': {
         const channel = normalizeUpdateChannel(payload)
         if (options.updateDeps === undefined) throw new Error('Account Hub 更新功能未初始化')
-        const value: RpcUpdateApplyResponse = await applyAccountHubUpdate(options.updateDeps, channel)
-        return { ok: true, value }
+        accountHubApplyProgress = { phase: 'idle', detail: '' }
+        try {
+          const value: RpcUpdateApplyResponse = await applyAccountHubUpdate(
+            options.updateDeps,
+            channel,
+            (phase, detail) => {
+              accountHubApplyProgress = { phase, detail }
+            },
+          )
+          accountHubApplyProgress = { phase: 'applied', detail: '安装完成' }
+          return { ok: true, value }
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          accountHubApplyProgress = { phase: 'failed', detail: '安装失败', error: message }
+          throw error
+        }
       }
+
+      case 'update.status':
+        return { ok: true, value: { ...accountHubApplyProgress } }
 
       case 'account.list': {
         const req = payload as RpcListAccountsRequest

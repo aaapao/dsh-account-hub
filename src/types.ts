@@ -557,6 +557,19 @@ export interface RpcUpdateApplyRequest {
   channel?: RpcUpdateChannel
 }
 
+/** RPC: `update.status` 请求；无入参。 */
+export type RpcUpdateStatusRequest = Record<string, never>
+
+/** `update.apply` / `update.status` 的阶段枚举。 */
+export type RpcUpdateStatusPhase = 'idle' | 'removing' | 'installing' | 'verifying' | 'applied' | 'failed'
+
+/** RPC: `update.status` 响应；detail 为服务端算好的中文阶段文案，客户端直显。 */
+export interface RpcUpdateStatusResponse {
+  phase: RpcUpdateStatusPhase
+  detail: string
+  error?: string
+}
+
 /** RPC: `update.apply` 响应。 */
 export interface RpcUpdateApplyResponse {
   previousSha: string

@@ -182,6 +182,8 @@ const STYLES = `
    标题行里图标按钮与文字按钮同排，若两者高度不同就会一行两种基线。宽度取同值
    以保持正方形。按钮本体仍由 ui-primitives 提供。 */
 .dim-ah-iconBtn { box-sizing: border-box; flex: none; width: 28px; min-width: 28px; height: 28px; padding: 0; display: inline-flex; align-items: center; justify-content: center; }
+/* 通道下拉保留图标按钮高度，但按「正式/Beta」文案自适应宽度。 */
+.dim-ah-channelBtn { box-sizing: border-box; flex: none; width: auto; min-width: max-content; height: 28px; padding: 0 10px; display: inline-flex; align-items: center; justify-content: center; }
 /* 未签到与登录入口采用白底黑字的 outline 外观。 */
 .dim-ah-iconBtn-light { background: white; color: black; }
 .dim-ah-iconGlyph { display: inline-flex; align-items: center; justify-content: center; line-height: 1; }

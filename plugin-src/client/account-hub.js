@@ -2995,7 +2995,7 @@ function AutoRoutePanel({ rpcCall }) {
  * 真实 React 会按引用相等 bail out 不重渲染 —— 不拷贝就等于静默吞更新。
  */
 const updateStore = {
-  state: { phase: 'idle' },
+  state: { phase: 'idle', progressDetail: '' },
   listeners: new Set(),
   get() { return this.state; },
   set(next) {
@@ -3032,7 +3032,7 @@ let currentUpdateChannel = loadStoredUpdateChannel();
 
 /** 测试专用：把 store 与通道偏好归零（每个用例都从干净的单例起步）。 */
 export function __resetUpdateUiForTests() {
-  updateStore.state = { phase: 'idle' };
+  updateStore.state = { phase: 'idle', progressDetail: '' };
   updateStore.listeners.clear();
   currentUpdateChannel = 'stable';
 }
@@ -3055,7 +3055,7 @@ function ChannelSelect({ channel, busy, onSelect }) {
     anchor: React.createElement(Button, {
       variant: 'outline',
       size: 'sm',
-      className: 'dim-ah-iconBtn',
+      className: 'dim-ah-channelBtn',
       'aria-label': '更新通道',
       'aria-haspopup': 'menu',
       'aria-expanded': open,
@@ -3104,7 +3104,7 @@ function UpdateStatusText({ update, onToggle }) {
     text = `有更新 ${update.latestVersion}`;
     tone = 'warn';
   } else if (update.phase === 'applying') {
-    text = '更新中…';
+    text = update.progressDetail || '更新中…';
     tone = 'muted';
   } else if (update.phase === 'applied') {
     text = `已更新到 ${update.currentVersion || update.latestVersion}，建议重启`;
@@ -3231,27 +3231,56 @@ export function AccountHubPage({ rpcCall }) {
    */
   const applyUpdate = async () => {
     // applying 保留 available 的 latestVersion / changelog：更新中显示哪个版本、
-    // 成功后展示哪份日志，都来自检查阶段缓存的这份事实。apply 的通道也来自
-    // store 里的这份事实（点击「更新」时它必为 available，channel 已在位）。
-    updateStore.set(prev => ({ ...prev, phase: 'applying' }));
-    let res;
+    // 成功后展示哪份日志，都来自检查阶段缓存的这份事实。通道从 store 读取，
+    // 避免页面重渲染后闭包里的旧快照影响 apply 请求。
+    const applyChannel = updateStore.get().channel || currentUpdateChannel;
+    updateStore.set(prev => ({ ...prev, phase: 'applying', progressDetail: '' }));
+
+    let polling = true;
+    let progressTimer;
+    const readProgress = async () => {
+      try {
+        const status = await rpcCall('update.status', {});
+        if (!polling) return;
+        updateStore.set(prev => ({
+          ...prev,
+          progressDetail: typeof status?.detail === 'string' ? status.detail : '',
+        }));
+      } catch (caught) {
+        // 进度 RPC 只是辅助播报；失败不应打断真正的 update.apply。
+        console.warn('[account-hub] update status failed:', caught);
+      }
+    };
+
+    // 先发起安装，再立即读取一次状态，之后每 800ms 轮询阶段明细。
+    const applyPromise = rpcCall('update.apply', { channel: applyChannel });
+    void readProgress();
+    progressTimer = setInterval(() => { void readProgress(); }, 800);
+
     try {
-      res = await rpcCall('update.apply', { channel: update.channel });
+      const res = await applyPromise;
+      updateStore.set(prev => ({
+        ...prev,
+        phase: 'applied',
+        progressDetail: '',
+        previousSha: res?.previousSha,
+        currentSha: res?.currentSha,
+        currentVersion: res?.currentVersion || prev.latestVersion,
+      }));
     } catch (caught) {
       // failed 保留 channel：失败后用户再点 ⇩ 重新检查时仍按原通道走，
       // 不悄悄回落到默认 stable（beta 用户在失败后突然看到 stable 的结果
       // 是一种「通道被重置」的错觉）。用户主动发起的动作，失败必须可见。
-      updateStore.set(prev => ({ ...prev, phase: 'failed', error: caught?.message || '更新失败' }));
-      return;
+      updateStore.set(prev => ({
+        ...prev,
+        phase: 'failed',
+        progressDetail: '',
+        error: caught?.message || '更新失败',
+      }));
+    } finally {
+      polling = false;
+      clearInterval(progressTimer);
     }
-
-    updateStore.set(prev => ({
-      ...prev,
-      phase: 'applied',
-      previousSha: res?.previousSha,
-      currentSha: res?.currentSha,
-      currentVersion: res?.currentVersion || prev.latestVersion,
-    }));
   };
 
   /**
@@ -3328,7 +3357,7 @@ export function AccountHubPage({ rpcCall }) {
               'aria-label': '更新',
               disabled: update.phase === 'applying',
               onClick: () => { setLogModalOpen(false); void applyUpdate(); },
-            }, update.phase === 'applying' ? '更新中…' : '更新')
+            }, '更新')
           : React.createElement(Button, {
               variant: 'outline',
               size: 'sm',
