@@ -2982,6 +2982,62 @@ function AutoRoutePanel({ rpcCall }) {
 }
 
 /**
+ * 更新状态的单例 store（模块级）。
+ *
+ * 为什么不在 `AccountHubPage` 的 useState 里：用户点「更新」后**离开账号中心**，
+ * 页面组件随之卸载，state 全丢 —— 回来时安装明明还在跑（RPC 在宿主进程里），
+ * 版本文本却回到「未安装」，用户无从判断是否还在装（v0.3.0 真机反馈）。
+ * 状态活在模块级、页面只是订阅者：卸载后 in-flight 的 check/apply 照常回灌
+ * store（闭包里的 `rpcCall` 是宿主注入的函数引用，不随组件卸载销毁），
+ * 重挂载时订阅即对齐，进度一个相位都不丢。
+ *
+ * `set` 恒定浅拷贝出新对象：订阅回调把**同一个引用**塞回 useState 时，
+ * 真实 React 会按引用相等 bail out 不重渲染 —— 不拷贝就等于静默吞更新。
+ */
+const updateStore = {
+  state: { phase: 'idle' },
+  listeners: new Set(),
+  get() { return this.state; },
+  set(next) {
+    this.state = typeof next === 'function' ? { ...next(this.state) } : { ...next };
+    for (const listener of this.listeners) listener(this.state);
+  },
+};
+
+/** 通道偏好落在 localStorage：跨宿主重启也记住「上次选的是 Beta」。 */
+const UPDATE_CHANNEL_STORAGE_KEY = 'dim-ah-update-channel';
+
+/** 读通道偏好；无存储 / 私有模式 / 值非法一律回退 stable（默认正式）。 */
+function loadStoredUpdateChannel() {
+  try {
+    const raw = globalThis.localStorage?.getItem(UPDATE_CHANNEL_STORAGE_KEY);
+    return raw === 'beta' || raw === 'stable' ? raw : 'stable';
+  } catch {
+    return 'stable';
+  }
+}
+
+/** 写通道偏好；存储不可用时静默 —— 偏好丢失不该打断切换动作本身。 */
+function storeUpdateChannel(ch) {
+  try {
+    globalThis.localStorage?.setItem(UPDATE_CHANNEL_STORAGE_KEY, ch);
+  } catch { /* 无 localStorage 环境（测试 / 隐私模式）：内存值仍生效 */ }
+}
+
+/**
+ * 当前通道（模块级，与 store 同生共死）：页面卸载重挂载之间保持，
+ * localStorage 只负责跨宿主重启。切换时先写这里再写存储。
+ */
+let currentUpdateChannel = loadStoredUpdateChannel();
+
+/** 测试专用：把 store 与通道偏好归零（每个用例都从干净的单例起步）。 */
+export function __resetUpdateUiForTests() {
+  updateStore.state = { phase: 'idle' };
+  updateStore.listeners.clear();
+  currentUpdateChannel = 'stable';
+}
+
+/**
  * 更新通道下拉：正式（GitHub release）/ Beta（master 提交）。
  *
  * 形态复用 `ConsumptionSelect` 的 Menu + Button 锚点范式 —— 宿主 ui-primitives
@@ -3077,24 +3133,36 @@ export function AccountHubPage({ rpcCall }) {
   // 每次切换 provider 时递增版号，强制重新挂载 ProviderPanel 触发 loadAccounts
   const [version, setVersion] = React.useState(0);
   /**
-   * 更新状态机：`idle` / `checking` / `available` / `latest` / `applying` /
-   * `applied` / `failed`。服务端（task-26 契约）已把显示用的版本字符串算好：
-   * `currentVersion` / `latestVersion`（beta 形如 `v0.2.0+b2ae129`）、`changelog`
-   * （新版本日志）、`currentChangelog`（当前版本日志）按相位出现，客户端直显。
+   * 更新状态机的**本地镜像**：真值在模块级 `updateStore`（见其头注释）——
+   * 页面卸载后 in-flight 的 check/apply 照常回灌 store，重挂载时这里拿
+   * `updateStore.get()` 做初值、再订阅后续变化，进度一个相位都不丢。
    *
-   * 落在**页面级**而不是 ProviderPanel：更新检查的是插件自身版本，七个供应商
-   * 面板与自动路由共用同一个事实 —— 逐个面板各挂一份只会得到八份互相矛盾的提示。
+   * 服务端（task-26 契约）已把显示用的版本字符串算好：`currentVersion` /
+   * `latestVersion`（beta 形如 `v0.2.0+b2ae129`）、`changelog`（新版本日志）、
+   * `currentChangelog`（当前版本日志）按相位出现，客户端直显。
+   *
+   * 状态**不**落在 ProviderPanel：更新检查的是插件自身版本，七个供应商面板与
+   * 自动路由共用同一个事实 —— 逐个面板各挂一份只会得到八份互相矛盾的提示。
    */
-  const [update, setUpdate] = React.useState({ phase: 'idle' });
-  /** 更新通道：`stable`（GitHub release）/ `beta`（master 提交），默认正式。 */
-  const [channel, setChannel] = React.useState('stable');
+  const [update, setUpdateState] = React.useState(updateStore.get());
+  // 订阅 effect 必须声明在挂载检查 effect **之前**：effect 按声明顺序执行，
+  // 先注册 listener，挂载检查写入 store 的第一个相位（checking）才有接收方。
+  React.useEffect(() => {
+    const listener = (next) => setUpdateState(next);
+    updateStore.listeners.add(listener);
+    // 注册即对齐：渲染与 effect 执行之间若相位推进过（async 回调落在缝隙里），
+    // 这里一次性追平；get() 引用未变时 setter 按引用相等 bail out，无额外渲染。
+    setUpdateState(updateStore.get());
+    return () => { updateStore.listeners.delete(listener); };
+  }, []);
   /**
-   * 版本文本的 changelog 展开态：available/applied 展示新版本日志，
-   * latest 展示当前版本日志（都由 check 响应直传，见 UpdateStatusText）。
+   * 更新通道：`stable`（GitHub release）/ `beta`（master 提交），默认正式。
+   * 真值在模块级 `currentUpdateChannel`（+ localStorage 持久化），这里只是
+   * 镜像 —— 卸载重挂载之间、乃至宿主重启后，通道选择都还在。
    */
-  const [logOpen, setLogOpen] = React.useState(false);
-  /** 卸载后不再 setState（异步检查 / 更新返回时组件可能已经不在了）。 */
-  const updateAliveRef = React.useRef(true);
+  const [channel, setChannelState] = React.useState(currentUpdateChannel);
+  /** 更新日志弹窗的开合态（随页面走：离开页面弹窗自然消失，不算丢状态）。 */
+  const [logModalOpen, setLogModalOpen] = React.useState(false);
   /**
    * 供应商折叠组：**默认展开**（用户拍板「默认不折叠」），且**不持久化** ——
    * 刷新页面回到展开态，不引入任何存储面。
@@ -3116,21 +3184,23 @@ export function AccountHubPage({ rpcCall }) {
    * （版本文本随之回到「未安装」之外的既有内容或消失，不新增提示面）。
    */
   const checkUpdate = async (chArg) => {
-    // 手动点击 ⇩ 与挂载时无参调用：用当前选中通道；通道切换时显式传入新值。
-    const ch = chArg === 'beta' || chArg === 'stable' ? chArg : channel;
-    setUpdate({ phase: 'checking', channel: ch });
+    // 手动点击 ⇩ 与挂载时无参调用：用当前选中通道（模块级真值）；通道切换时显式传入新值。
+    const ch = chArg === 'beta' || chArg === 'stable' ? chArg : currentUpdateChannel;
+    updateStore.set({ phase: 'checking', channel: ch });
     let res;
     try {
       res = await rpcCall('update.check', { channel: ch });
     } catch (caught) {
       console.warn('[account-hub] update check failed:', caught);
-      if (updateAliveRef.current) setUpdate({ phase: 'idle', channel: ch });
+      // 静默回落 idle **照常写 store**：页面在不在都写。页面不在时这条更新
+      // 没有接收方，但重挂载时拿到的必须是回落后的终态，而不是过期的 checking
+      // （rpcCall 闭包持宿主注入的函数引用，不随组件卸载销毁，见 store 头注释）。
+      updateStore.set({ phase: 'idle', channel: ch });
       return;
     }
-    if (!updateAliveRef.current) return;
 
     if (res?.hasUpdate === true) {
-      setUpdate({
+      updateStore.set({
         phase: 'available',
         channel: ch,
         latestTitle: res.latestTitle,
@@ -3145,7 +3215,7 @@ export function AccountHubPage({ rpcCall }) {
     }
 
     // 无更新：版本文本直接显示服务端解析好的当前版本号。
-    setUpdate({
+    updateStore.set({
       phase: 'latest',
       channel: ch,
       currentSha: res?.currentSha,
@@ -3161,23 +3231,21 @@ export function AccountHubPage({ rpcCall }) {
    */
   const applyUpdate = async () => {
     // applying 保留 available 的 latestVersion / changelog：更新中显示哪个版本、
-    // 成功后展示哪份日志，都来自检查阶段缓存的这份事实。
-    setUpdate(prev => ({ ...prev, phase: 'applying' }));
+    // 成功后展示哪份日志，都来自检查阶段缓存的这份事实。apply 的通道也来自
+    // store 里的这份事实（点击「更新」时它必为 available，channel 已在位）。
+    updateStore.set(prev => ({ ...prev, phase: 'applying' }));
     let res;
     try {
       res = await rpcCall('update.apply', { channel: update.channel });
     } catch (caught) {
-      if (updateAliveRef.current) {
-        // failed 保留 channel：失败后用户再点 ⇩ 重新检查时仍按原通道走，
-        // 不悄悄回落到默认 stable（beta 用户在失败后突然看到 stable 的结果
-        // 是一种「通道被重置」的错觉）。
-        setUpdate(prev => ({ ...prev, phase: 'failed', error: caught?.message || '更新失败' }));
-      }
+      // failed 保留 channel：失败后用户再点 ⇩ 重新检查时仍按原通道走，
+      // 不悄悄回落到默认 stable（beta 用户在失败后突然看到 stable 的结果
+      // 是一种「通道被重置」的错觉）。用户主动发起的动作，失败必须可见。
+      updateStore.set(prev => ({ ...prev, phase: 'failed', error: caught?.message || '更新失败' }));
       return;
     }
-    if (!updateAliveRef.current) return;
 
-    setUpdate(prev => ({
+    updateStore.set(prev => ({
       ...prev,
       phase: 'applied',
       previousSha: res?.previousSha,
@@ -3187,19 +3255,17 @@ export function AccountHubPage({ rpcCall }) {
   };
 
   /**
-   * 挂载后自动**静默**检查一次：只在真有更新时才出现提示行。
+   * 挂载后自动**静默**检查一次。**仅在 store 处于 idle 时**：
+   * store 是模块级单例 —— 用户离开账号中心再回来时，apply 还在途（applying）
+   * 或刚有结论（available/applied/failed/latest），这次重挂载必须**接着展示**，
+   * 而不是发起一次新检查把进行中的相位冲掉（那正是本次要修的缺陷）。
    *
    * deps 为空 ⇒ 整页生命周期内只跑一次。切 provider 不会重跑：`AccountHubPage`
-   * 自己不重挂载（重挂载的是右侧面板）。cleanup 标记「已卸载」——
-   * 异步结果回来时组件可能已经不在了，那时 setState 是纯浪费。
+   * 自己不重挂载（重挂载的是右侧面板）。检查的写入全部走 store：页面在不在
+   * 都不丢相位，也不再需要「卸载后别 setState」的守卫（store 没有那个约束）。
    */
   React.useEffect(() => {
-    updateAliveRef.current = true;
-    // 挂载检查按当前通道（默认 stable）——channel 是 state，但挂载时恒为初值。
-    void checkUpdate(channel);
-    return () => {
-      updateAliveRef.current = false;
-    };
+    if (updateStore.get().phase === 'idle') void checkUpdate();
   }, []);
 
   return React.createElement('section', { className: 'dim-ah-page', 'aria-label': '账号中心' },
@@ -3218,49 +3284,59 @@ export function AccountHubPage({ rpcCall }) {
             React.createElement('strong', { className: 'dim-ah-brandName' }, '账号中心')),
           // 版本号文本（用户拍板替换原「已是最新」Tag）：常态显示当前版本号，
           // 有更新变黄「有更新 vX」，更新过程（更新中/已更新到/更新失败）也在这。
+          // 点击不再就地展开日志，而是弹出「更新日志」弹窗（用户拍板）—— 弹窗
+          // 定义在页面根部，见 logModalOpen。
           React.createElement(UpdateStatusText, {
             update,
-            onToggle: () => setLogOpen(prev => !prev),
-          }),
-          logOpen && versionLogOf(update) !== ''
-            ? React.createElement('pre', { className: 'dim-ah-updateLog' }, versionLogOf(update))
-            : null),
+            onToggle: () => setLogModalOpen(prev => !prev),
+          })),
         React.createElement('p', { className: 'dim-ah-brandDesc' }, 'Provider 凭据管理与多账号支持')),
-      // 「检查更新 / 更新」按钮（用户拍板的双态）：常态是 outline 图标按钮 ⇩
-      // （aria-label「检查更新」）；有更新时原地变为白底黑字的 primary 文字按钮
-      // 「更新」（aria-label 同步换），点击即安装 —— 入口不挪位，视线不用重新找。
-      // 更新中 / 检查中两态都禁用：更新中防重复触发，检查中防检查与安装并发交错。
-      update.phase === 'available' || update.phase === 'applying'
-        ? React.createElement(Button, {
-            variant: 'primary',
-            size: 'sm',
-            className: 'dim-ah-updateBtn',
-            'aria-label': '更新',
-            disabled: update.phase === 'applying',
-            onClick: () => void applyUpdate(),
-          }, update.phase === 'applying' ? '更新中…' : '更新')
-        : React.createElement(Button, {
-            variant: 'outline',
-            size: 'sm',
-            className: 'dim-ah-iconBtn',
-            'aria-label': '检查更新',
-            disabled: update.phase === 'checking',
-            onClick: () => void checkUpdate(),
-          }, React.createElement('span', { 'aria-hidden': 'true' }, '⇩')),
-      // 更新通道下拉（用户拍板）：正式 = GitHub release，Beta = master 提交；
-      // 切换即立刻按新通道检查一次 —— 通道是「下一跳查什么」的谓词，选完就看效果。
-      // checking/applying 期间禁切：通道切换即触发新检查，与进行中的动作并发会
-      // 让两次响应交错回灌同一状态机（版本文本闪跳、apply 装错通道的版本）。
-      React.createElement(ChannelSelect, {
-        channel,
-        busy: update.phase === 'checking' || update.phase === 'applying',
-        onSelect: (id) => {
-          if (id === channel) return;
-          setChannel(id);
-          setLogOpen(false);
-          void checkUpdate(id);
-        },
-      })),
+      // header 右侧操作组（v0.3.1 布局修复）：header 是 space-between 双栏，
+      // 右栏整体包一层 flex 容器 —— 更新按钮保持 v0.3.0 之前的原位（最右端），
+      // 通道下拉紧挨其左（用户拍板「切换按钮应该挨在更新按钮左边」）。
+      // 若把两个控件平级塞进 header，space-between 会把通道下拉甩到正中间
+      // （v0.3.0 真机反馈的「更新按钮跑到左边中间去了」就是这个原因）。
+      React.createElement('div', { className: 'dim-ah-headerActions' },
+        // 更新通道下拉（用户拍板）：正式 = GitHub release，Beta = master 提交；
+        // 切换即立刻按新通道检查一次 —— 通道是「下一跳查什么」的谓词，选完就看效果。
+        // checking/applying 期间禁切：通道切换即触发新检查，与进行中的动作并发会
+        // 让两次响应交错回灌同一状态机（版本文本闪跳、apply 装错通道的版本）。
+        React.createElement(ChannelSelect, {
+          channel,
+          busy: update.phase === 'checking' || update.phase === 'applying',
+          onSelect: (id) => {
+            if (id === channel) return;
+            // 通道偏好写模块级真值 + localStorage（用户拍板「切换状态也要保存」）：
+            // 离开页面再回来、乃至宿主重启，选择都还在。
+            currentUpdateChannel = id;
+            storeUpdateChannel(id);
+            setChannelState(id);
+            // 换通道即换检查结果：弹窗若还开着旧通道的日志，正文会突变 —— 关掉。
+            setLogModalOpen(false);
+            void checkUpdate(id);
+          },
+        }),
+        // 「检查更新 / 更新」按钮（用户拍板的双态）：常态是 outline 图标按钮 ⇩
+        // （aria-label「检查更新」）；有更新时原地变为白底黑字的 primary 文字按钮
+        // 「更新」（aria-label 同步换），点击即安装 —— 入口不挪位，视线不用重新找。
+        // 更新中 / 检查中两态都禁用：更新中防重复触发，检查中防检查与安装并发交错。
+        update.phase === 'available' || update.phase === 'applying'
+          ? React.createElement(Button, {
+              variant: 'primary',
+              size: 'sm',
+              className: 'dim-ah-updateBtn',
+              'aria-label': '更新',
+              disabled: update.phase === 'applying',
+              onClick: () => { setLogModalOpen(false); void applyUpdate(); },
+            }, update.phase === 'applying' ? '更新中…' : '更新')
+          : React.createElement(Button, {
+              variant: 'outline',
+              size: 'sm',
+              className: 'dim-ah-iconBtn',
+              'aria-label': '检查更新',
+              disabled: update.phase === 'checking',
+              onClick: () => void checkUpdate(),
+            }, React.createElement('span', { 'aria-hidden': 'true' }, '⇩')))),
     React.createElement('div', { className: 'dim-ah-layout' },
       React.createElement('nav', { className: 'dim-ah-rail', role: 'tablist', 'aria-label': 'Provider 导航' },
         // 组标题走 ui-primitives 的 DisclosureRow：`expandOnRowClick` 让整行成为
@@ -3324,5 +3400,20 @@ export function AccountHubPage({ rpcCall }) {
               provider: p.id,
               rpcCall,
             })
-          : null))));
+          : null))),
+    // 更新日志弹窗（用户拍板「弹窗显示，不要就地显示」）：挂在页面根部，
+    // 点版本文本开关，换通道 / 点更新时主动关掉。title 带版本号 —— 弹窗脱离了
+    // 版本文本的上下文，不带版本号用户不知道日志属于哪一版。
+    logModalOpen
+      ? React.createElement(Modal, {
+          open: true,
+          onClose: () => setLogModalOpen(false),
+          title: `更新日志${update.phase === 'latest' ? `（${update.currentVersion || '当前版本'}）` : update.latestVersion ? `（${update.latestVersion}）` : ''}`,
+          closeLabel: '关闭更新日志',
+          description: versionLogOf(update) === '' ? '暂无日志' : null,
+        },
+        versionLogOf(update) !== ''
+          ? React.createElement('pre', { className: 'dim-ah-updateLog' }, versionLogOf(update))
+          : null)
+      : null);
 }

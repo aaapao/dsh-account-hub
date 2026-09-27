@@ -1,5 +1,5 @@
 /**
- * 页面级「检查更新 / 一键更新」UI 的**渲染级**回归（v0.3.0 版本文本形态）。
+ * 页面级「检查更新 / 一键更新」UI 的**渲染级**回归（v0.3.1 形态）。
  *
  * ## 为什么必须是渲染级
  *
@@ -16,10 +16,12 @@
  *
  * - 挂载后**自动静默**按 stable 通道检查一次；有更新时 header 版本文本变黄
  *   「有更新 vX」，⇩ 按钮原地变 primary「更新」按钮；
- * - 无更新时版本文本显示当前版本号（currentVersion），点击展开当前版本日志；
- * - 点「更新」→ 按钮转禁用「更新中…」，版本文本位显示「更新中…」→ 成功后
- *   「已更新到 <版本>，建议重启」+ 可展开的新版本 changelog；
- * - 切换通道下拉为 Beta：立即按 beta 通道重新检查（update.check 带 channel: 'beta'）；
+ * - 无更新时版本文本显示当前版本号（currentVersion）；
+ * - **更新状态活在模块级 store**（v0.3.1 核心修复）：点「更新」后离开账号中心
+ *   （组件卸载）再回来（重挂载），applying 进度不丢、已完成的终态不重查；
+ * - 点版本文本弹「更新日志」弹窗（Modal，不就地展开）；空日志弹「暂无日志」；
+ * - 切换通道下拉为 Beta：立即按 beta 通道重新检查（update.check 带
+ *   channel: 'beta'），且通道选择持久化（模块变量 + localStorage）；
  * - apply 失败：版本文本位显示**服务端原始 message**（error 色）；
  * - 检查失败静默：只 `console.warn`，版本文本不留报错。
  *
@@ -195,7 +197,8 @@ function toCjs(source: string): string {
   out = out.replace(/\bexport\s+(?=(?:function|const|let|var|class)\s)/g, '')
   return out.concat(
     '\nmodule.exports.__testExports = {'
-    + ' AccountHubPage: AccountHubPage, ProviderPanel: ProviderPanel };\n',
+    + ' AccountHubPage: AccountHubPage, ProviderPanel: ProviderPanel,'
+    + ' __resetUpdateUiForTests: __resetUpdateUiForTests };\n',
   )
 }
 
@@ -207,14 +210,15 @@ interface HookedReact {
   __drainEffects: () => void
 }
 
-let tempDir: string | undefined
+const tempDirs: string[] = []
 afterAll(() => {
-  if (tempDir !== undefined) rmSync(tempDir, { recursive: true, force: true })
+  for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true })
 })
 
 function loadClientModule(): {
   AccountHubPage: (props: Record<string, unknown>) => unknown
   hooks: HookedReact
+  __resetUpdateUiForTests: () => void
 } {
   const cjs = toCjs(readFileSync(resolve(here, '../../plugin-src/client/account-hub.js'), 'utf8'))
 
@@ -231,11 +235,12 @@ function loadClientModule(): {
   const requireFromTemp = createRequire(pathToFileURL(join(dir, 'noop.cjs')).href)
   const loaded = requireFromTemp(join(dir, 'account-hub.js')) as { __testExports: Record<string, unknown> }
   const hooks = requireFromTemp(join(dir, 'node_modules', 'react', 'index.js')) as HookedReact
-  tempDir = dir
+  tempDirs.push(dir)
   const exported = loaded.__testExports
   return {
     AccountHubPage: exported.AccountHubPage as (props: Record<string, unknown>) => unknown,
     hooks,
+    __resetUpdateUiForTests: exported.__resetUpdateUiForTests as () => void,
   }
 }
 
@@ -335,7 +340,19 @@ const client = loadClientModule()
  * 且 `useEffect(…, [])` 因 deps 比对相同而**根本不再执行**（挂载自动检查不跑）。
  * 详见 REACT_STUB 里 `__resetStores` 的说明。
  */
-beforeEach(() => { client.hooks.__resetStores() })
+beforeEach(() => {
+  client.hooks.__resetStores()
+  client.__resetUpdateUiForTests()
+  // 每用例一只全新 localStorage：既保证「无存储环境」的默认断言成立，
+  // 也让「通道写进了 localStorage」的断言可以在独立实例上验证。
+  const backing = new Map<string, string>()
+  ;(globalThis as Record<string, unknown>).localStorage = {
+    getItem: (k: string) => (backing.has(k) ? backing.get(k)! : null),
+    setItem: (k: string, v: string) => { backing.set(k, String(v)) },
+    removeItem: (k: string) => { backing.delete(k) },
+    clear: () => { backing.clear() },
+  }
+})
 
 /** 服务端契约里的两个 sha：前 8 位刻意不同，避免「拿 currentSha 冒充 latestSha」假绿。 */
 const SHA_OLD = '1111111111111111111111111111111111111111'
@@ -442,7 +459,7 @@ describe('页面级「检查更新 / 一键更新」（版本文本三态 + 通�
     expect(findButtonByLabel(tree, '检查更新'), '有更新时不应再显示 ⇩ 检查按钮').toBeUndefined()
   })
 
-  it('无更新：版本文本显示当前版本号，点击展开当前版本日志', async () => {
+  it('无更新：版本文本显示当前版本号，点击弹「更新日志」弹窗（当前版本日志）', async () => {
     const { rpcCall } = makeUpdateRpc({
       check: async () => ({
         hasUpdate: false,
@@ -464,12 +481,28 @@ describe('页面级「检查更新 / 一键更新」（版本文本三态 + 通�
       .not.toContain('已是最新')
     expect(versionText!.props['data-tone'], '常态版本文本应是低调色').toBe('idle')
 
-    // 点击版本文本 → 展开当前版本的 changelog（task-26 契约里的 currentChangelog）。
+    // 弹窗未开：日志正文（task-26 契约里的 currentChangelog）不在树里 ——
+    // 「不要就地显示」的直接判据。
+    expect(textsOf(tree).join(''), '弹窗未开时日志正文不该出现在树里')
+      .not.toContain('首个正式 release')
+
+    // 点击版本文本 → 弹「更新日志」弹窗：h2 标题带当前版本号，正文是当前版本日志。
     ;(versionText!.props.onClick as () => void)()
     const openTree = await renderStable(client.AccountHubPage, { rpcCall }, client.hooks)
-    const texts = textsOf(openTree).join('')
-    expect(texts, '点击版本文本后没有展开当前版本日志').toContain('首个正式 release')
-    // 再点一次收起（toggle 语义）。
+    // 整树里可能有别的 h2（ProviderPanel 标题），按「更新日志」前缀定位弹窗标题。
+    const modalTitle = flatten(openTree)
+      .filter(isElement)
+      .find((el) => el.type === 'h2' && textsOf(el).join('').startsWith('更新日志'))
+    expect(modalTitle, '点击版本文本后没有弹出「更新日志」弹窗（无对应 h2 标题）').toBeDefined()
+    expect(textsOf(modalTitle!).join(''), '弹窗标题应为「更新日志」带当前版本号')
+      .toBe(`更新日志（${CURRENT_VERSION}）`)
+    expect(textsOf(openTree).join(''), '弹窗正文没有当前版本日志').toContain('首个正式 release')
+    // 弹窗必须有关闭入口（无文本图标按钮，aria-label 定位）。
+    expect(findButtonByLabel(openTree, '关闭更新日志'), '弹窗里没有「关闭更新日志」按钮')
+      .toBeDefined()
+
+    // 再点一次版本文本收起（toggle 语义；真件的关闭按钮是图标按钮，
+    // 替身不接 onClose，故经 toggle 入口验证同一份 logModalOpen 状态）。
     ;(versionTextOf(openTree)!.props.onClick as () => void)()
     const closedTree = await renderStable(client.AccountHubPage, { rpcCall }, client.hooks)
     expect(textsOf(closedTree).join(''), '再次点击没有收起日志').not.toContain('首个正式 release')
@@ -491,11 +524,21 @@ describe('页面级「检查更新 / 一键更新」（版本文本三态 + 通�
 
     const tree = await renderStable(client.AccountHubPage, { rpcCall }, client.hooks)
 
-    // 有更新态点版本文本 → 展开的是**新版本**日志（不是当前版本的）。
+    // 有更新态：弹窗未开时日志不在树里（「不要就地显示」）。
+    expect(textsOf(tree).join(''), '有更新态弹窗未开时新版本日志不该出现在树里')
+      .not.toContain('检查更新切换 release 轨道')
+
+    // 点版本文本 → 弹的是**新版本**日志（不是当前版本的）：标题带新版本号。
     ;(versionTextOf(tree)!.props.onClick as () => void)()
     const openTree = await renderStable(client.AccountHubPage, { rpcCall }, client.hooks)
-    const texts = textsOf(openTree).join('')
-    expect(texts, '有更新态点击版本文本应展开新版本日志').toContain('检查更新切换 release 轨道')
+    // 整树里可能有别的 h2（ProviderPanel 标题），按「更新日志」前缀定位弹窗标题。
+    const modalTitle = flatten(openTree)
+      .filter(isElement)
+      .find((el) => el.type === 'h2' && textsOf(el).join('').startsWith('更新日志'))
+    expect(modalTitle, '有更新态点击版本文本没有弹出「更新日志」弹窗').toBeDefined()
+    expect(textsOf(modalTitle!).join(''), '有更新态弹窗标题应带新版本号')
+      .toBe(`更新日志（${LATEST_TAG}）`)
+    expect(textsOf(openTree).join(''), '弹窗正文应是新版本日志').toContain('检查更新切换 release 轨道')
 
     // 点「更新」→ update.apply 带 stable 通道。apply 返回挂起的 gate，
     // 把相位钉在 applying 上断言「更新过程显示在版本文本位」。
@@ -550,10 +593,14 @@ describe('页面级「检查更新 / 一键更新」（版本文本三态 + 通�
       .toContain(`已更新到 ${LATEST_TAG}，建议重启`)
     expect(versionTextOf(doneTree)!.props['data-tone'], '成功态应是成功色').toBe('ok')
 
-    // 成功后点击版本文本 → 展开新版本 changelog。
+    // 成功后点击版本文本 → 弹新版本日志弹窗（applied 相位读检查缓存的 changelog）。
     ;(versionTextOf(doneTree)!.props.onClick as () => void)()
     const openTree = await renderStable(client.AccountHubPage, { rpcCall }, client.hooks)
-    expect(textsOf(openTree).join(''), '成功态点击应能展开新版本日志')
+    const modalTitle = flatten(openTree)
+      .filter(isElement)
+      .find((el) => el.type === 'h2')
+    expect(modalTitle, '成功态点击版本文本没有弹出「更新日志」弹窗').toBeDefined()
+    expect(textsOf(openTree).join(''), '成功态弹窗正文应是新版本日志')
       .toContain('检查更新切换 release 轨道')
   })
 
@@ -651,6 +698,162 @@ describe('页面级「检查更新 / 一键更新」（版本文本三态 + 通�
     // beta 有更新：版本文本显示「有更新 v0.2.0+3333333」（tag+短 sha 形态直显）。
     expect(textsOf(versionTextOf(betaTree)!).join(''), 'beta 有更新应显示 tag+短 sha 版本号')
       .toContain(`有更新 ${LATEST_VERSION_BETA}`)
+
+    // 通道选择持久化（用户拍板「切换状态也要保存」）：写入 localStorage 固定键，
+    // 离开页面再回来、乃至宿主重启都靠它恢复。（node 环境无 DOM lib，经
+    // globalThis 取 beforeEach 装的 stub，不裸用 localStorage 标识符。）
+    const storage = (globalThis as Record<string, unknown>).localStorage as
+      { getItem(key: string): string | null } | undefined
+    expect(storage?.getItem('dim-ah-update-channel'), '切换通道后没有写入 localStorage')
+      .toBe('beta')
+    // 切换后锚点文案跟着换：用户下一次打开菜单前就该看到当前通道是 Beta。
+    expect(textsOf(findButtonByLabel(betaTree, '更新通道')!).join(''), '切换后通道锚点应显示 Beta')
+      .toContain('Beta')
+  })
+
+  it('更新中离开账号中心再回来：进度不丢、不重查（模块级 store 跨卸载存活）', async () => {
+    // 「更新中」时用户切走再切回 —— 真实场景是组件卸载（离开账号中心）后重挂载。
+    // 模拟：清组件 hooks 槽位（= 卸载，新的组件实例），再 renderStable（= 重挂载）。
+    // updateStore 是模块级单例，不受槽位重置影响 —— 这正是 v0.3.1 要守护的语义。
+    const gate = deferred<{ previousSha: string; currentSha: string; currentVersion: string }>()
+    const { calls, rpcCall } = makeUpdateRpc({
+      check: async () => ({
+        hasUpdate: true,
+        currentSha: SHA_OLD,
+        latestSha: SHA_NEW,
+        latestTag: LATEST_TAG,
+        latestTitle: LATEST_TITLE,
+        latestVersion: LATEST_TAG,
+        currentVersion: CURRENT_VERSION,
+        changelog: CHANGELOG,
+      }),
+      apply: () => gate.promise,
+    })
+
+    const tree = await renderStable(client.AccountHubPage, { rpcCall }, client.hooks)
+    ;(findButtonByLabel(tree, '更新')!.props.onClick as () => void)()
+    const applyingTree = await renderStable(client.AccountHubPage, { rpcCall }, client.hooks)
+    expect(textsOf(versionTextOf(applyingTree)!).join(''), '前置：点击后应进入「更新中」相位')
+      .toContain('更新中…')
+
+    // 「离开页面」：清组件槽位 —— 旧实例连同它的 state/effect 一并销毁。
+    client.hooks.__resetStores()
+    // 「回到页面」：重挂载。applying 相位必须原样恢复（store 存活），
+    // 且不得再发 update.check（phase 非 idle ⇒ 挂载自动检查跳过）。
+    const backTree = await renderStable(client.AccountHubPage, { rpcCall }, client.hooks)
+    expect(countOf(calls, 'update.check'), '重挂载后不得再发 update.check（进度未丢时不重查）').toBe(1)
+    expect(textsOf(versionTextOf(backTree)!).join(''), '重挂载后「更新中」进度丢失')
+      .toContain('更新中…')
+    const backBtn = findButtonByLabel(backTree, '更新')
+    expect(backBtn, '重挂载后更新按钮丢失').toBeDefined()
+    expect(backBtn!.props.disabled, '重挂载后「更新中…」按钮必须是禁用态').toBe(true)
+
+    // apply 在页面外完成：相位照常推进到 applied（listener 已被 cleanup 摘除，
+    // store 仍是真值），用户再回来时看到终态 —— 一次安装全程可见，无中间黑洞。
+    gate.resolve({ previousSha: SHA_OLD, currentSha: SHA_NEW, currentVersion: LATEST_TAG })
+    const doneTree = await renderStable(client.AccountHubPage, { rpcCall }, client.hooks)
+    expect(textsOf(versionTextOf(doneTree)!).join(''), '页面外完成安装后回来应看到成功终态')
+      .toContain(`已更新到 ${LATEST_TAG}，建议重启`)
+  })
+
+  it('空日志：弹「暂无日志」说明文案，不渲染日志正文', async () => {
+    // 服务端没给 changelog（新装/历史版本无 release notes）：弹窗不能空壳。
+    const { rpcCall } = makeUpdateRpc({
+      check: async () => ({
+        hasUpdate: false,
+        currentSha: SHA_OLD,
+        latestSha: SHA_OLD,
+        latestTitle: '',
+        currentVersion: CURRENT_VERSION,
+        // currentChangelog 缺失 ⇒ versionLogOf 返回 '' ⇒ 弹「暂无日志」。
+      }),
+    })
+
+    const tree = await renderStable(client.AccountHubPage, { rpcCall }, client.hooks)
+    ;(versionTextOf(tree)!.props.onClick as () => void)()
+    const openTree = await renderStable(client.AccountHubPage, { rpcCall }, client.hooks)
+    expect(textsOf(openTree).join(''), '空日志弹窗应显示「暂无日志」').toContain('暂无日志')
+    // 弹窗标题仍在（空日志也有归属版本号）。
+    const modalTitle = flatten(openTree)
+      .filter(isElement)
+      .find((el) => el.type === 'h2')
+    expect(modalTitle, '空日志弹窗也应有标题').toBeDefined()
+    // 不渲染 pre 日志正文（description 承担说明，children 为 null）。
+    expect(flatten(openTree).filter(isElement).find((el) => el.type === 'pre'), '空日志不应渲染日志正文 pre')
+      .toBeUndefined()
+  })
+
+  it('通道偏好跨「宿主重启」存活：模块重载时从 localStorage 恢复 beta', async () => {
+    // 模块级 `let currentUpdateChannel = loadStoredUpdateChannel()` 在 require 时
+    // 求值 —— 二次 loadClientModule（= 模块重载 = 宿主重启的近似）时才会重读
+    // localStorage。本用例验证：此前写入的 beta 在重载后仍是默认通道。
+    const backing = new Map<string, string>()
+    backing.set('dim-ah-update-channel', 'beta')
+    ;(globalThis as Record<string, unknown>).localStorage = {
+      getItem: (k: string) => (backing.has(k) ? backing.get(k)! : null),
+      setItem: (k: string, v: string) => { backing.set(k, String(v)) },
+      removeItem: (k: string) => { backing.delete(k) },
+      clear: () => { backing.clear() },
+    }
+
+    // 二次加载：新模块实例（新的 currentUpdateChannel 求值）+ 新 hooks 槽位。
+    const client2 = loadClientModule()
+    const { calls, rpcCall } = makeUpdateRpc({
+      check: async () => ({
+        hasUpdate: false,
+        currentSha: SHA_OLD,
+        latestSha: SHA_OLD,
+        latestTitle: '',
+        currentVersion: CURRENT_VERSION,
+        currentChangelog: CURRENT_CHANGELOG,
+      }),
+    })
+
+    // 挂载即按恢复的 beta 通道检查，锚点也显示 Beta。
+    const tree = await renderStable(client2.AccountHubPage, { rpcCall }, client2.hooks)
+    expect(countOf(calls, 'update.check'), '重载后挂载应自动检查').toBe(1)
+    expect(lastCheckChannel(calls), '重载后默认通道应从 localStorage 恢复为 beta').toBe('beta')
+    // 通道下拉锚点显示「Beta」（用户重进页面能看见自己上次的偏好）。
+    const anchor = findButtonByLabel(tree, '更新通道')
+    expect(anchor, '通道下拉锚点丢失').toBeDefined()
+    expect(textsOf(anchor!).join(''), '通道锚点应显示 Beta').toContain('Beta')
+  })
+
+  it('header 右侧布局：通道下拉紧挨更新按钮左边（不居中、不换位）', async () => {
+    const { rpcCall } = makeUpdateRpc({
+      check: async () => ({
+        hasUpdate: true,
+        currentSha: SHA_OLD,
+        latestSha: SHA_NEW,
+        latestTag: LATEST_TAG,
+        latestTitle: LATEST_TITLE,
+        latestVersion: LATEST_TAG,
+        currentVersion: CURRENT_VERSION,
+        changelog: CHANGELOG,
+      }),
+    })
+
+    const tree = await renderStable(client.AccountHubPage, { rpcCall }, client.hooks)
+
+    // 布局容器存在：两个控件都在 .dim-ah-headerActions 里（v0.3.1 修复）。
+    const actions = flatten(tree)
+      .filter(isElement)
+      .find((el) => el.props.className === 'dim-ah-headerActions')
+    expect(actions, 'header 右侧没有 .dim-ah-headerActions 容器').toBeDefined()
+
+    // 容器内顺序：ChannelSelect（锚点『更新通道』）在前（左），更新按钮在后（右）。
+    // 判据：容器 children 里，锚点按钮的祖先序号 < 更新按钮的祖先序号。
+    const childrenOfActions = (actions!.children as unknown[])
+      .map((child) => flatten(child))
+    const anchorIdx = childrenOfActions.findIndex(
+      (nodes) => nodes.some((n) => isElement(n) && n.type === 'button' && n.props['aria-label'] === '更新通道'),
+    )
+    const updateBtnIdx = childrenOfActions.findIndex(
+      (nodes) => nodes.some((n) => isElement(n) && n.type === 'button' && n.props['aria-label'] === '更新'),
+    )
+    expect(anchorIdx, '.dim-ah-headerActions 里没有通道下拉').toBeGreaterThanOrEqual(0)
+    expect(updateBtnIdx, '.dim-ah-headerActions 里没有「更新」按钮').toBeGreaterThanOrEqual(0)
+    expect(anchorIdx, '通道下拉必须在更新按钮左边').toBeLessThan(updateBtnIdx)
   })
 
   it('挂载时的检查网络失败：版本文本不留报错、不抛，只留一条 console.warn', async () => {

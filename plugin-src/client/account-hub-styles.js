@@ -39,6 +39,9 @@ const STYLES = `
    确定高度，右栏才有可滚动的边界。 */
 .dim-ah-page { display: flex; flex-direction: column; height: 100%; color: var(--dsw-alias-label-primary); }
 .dim-ah-header { display: flex; align-items: center; justify-content: space-between; padding: 16px 24px; border-bottom: 1px solid var(--dsw-alias-border-l2); }
+/* header 右侧操作组：通道下拉 + 更新按钮挤在同一组里，靠 gap 分隔 ——
+   更新按钮保持最右原位（v0.3.1 布局修复，不随新增控件漂移）。 */
+.dim-ah-headerActions { display: flex; align-items: center; gap: 8px; flex: none; }
 .dim-ah-brand { display: flex; flex-direction: column; }
 .dim-ah-brandTitleRow { display: flex; align-items: center; gap: 8px; }
 /* 品牌名是外链（仓库地址）：不加下划线以保持标题观感，颜色沿用链接
