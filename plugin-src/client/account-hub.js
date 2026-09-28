@@ -3409,11 +3409,12 @@ function AutoRoutePanel({ rpcCall }) {
         React.createElement('div', { className: 'dim-ah-arAddEntry' },
           React.createElement(Button, {
             variant: 'outline',
-            size: 'sm',
-            className: 'dim-ah-btn-stable',
+            className: 'dim-ah-arAddButton',
             disabled: saving,
             onClick: () => addEntry(def.id),
-          }, '添加模型'))));
+          },
+            React.createElement(IconPlusOutlineRegular, { size: 14 }),
+            '添加候选模型'))));
   };
 
   const pendingDefinition = pendingDelete === null
@@ -3451,13 +3452,8 @@ function AutoRoutePanel({ rpcCall }) {
         label: '启用自动路由',
         onChange: (next) => void toggleEnabled(next),
       }), AUTO_ROUTE_SWITCH_HELP),
-      withHoverTitle(React.createElement(Button, {
-        variant: 'outline',
-        size: 'sm',
-        className: 'dim-ah-iconBtn',
-        'aria-label': '添加自动模型',
-        onClick: addDefinition,
-      }, React.createElement(IconPlusOutlineRegular, { size: 16 })), '添加自动模型')),
+     ),
+
     loadError !== null
       ? React.createElement('div', { className: 'dim-ah-arError', role: 'alert' },
           React.createElement('span', null, loadError),
@@ -3490,6 +3486,16 @@ function AutoRoutePanel({ rpcCall }) {
             React.createElement('p', null, '尚未配置自动模型'),
             React.createElement('p', null, '自动模型是一个暴露给 DSH 的模型名，背后是一串按顺序降级的候选。'))
         : React.createElement('div', { className: 'dim-ah-arList' }, draft.map(renderDefinition)),
+    phase === 'loading'
+      ? null
+      : React.createElement('div', { className: 'dim-ah-arAddDefinition' },
+          React.createElement(Button, {
+            variant: 'outline',
+            className: 'dim-ah-arAddButton',
+            onClick: addDefinition,
+          },
+            React.createElement(IconPlusOutlineRegular, { size: 14 }),
+            '添加自动模型')),
     // 删除定义的确认弹窗（单条定义属轻量破坏，二键确认即可，不用勾选闸）。
     pendingDefinition !== null
       ? React.createElement(Modal, {

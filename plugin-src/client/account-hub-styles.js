@@ -332,7 +332,7 @@ const STYLES = `
    与 provider 面板**同处 .dim-ah-panel 容器**，故这里只需要面板内部的行排布：
    标题与操作控件、卡片列表、卡片内的候选行。 */
 
-/* 面板头部：标题、总开关与添加入口同排，开关和加号紧随标题。 */
+/* 面板头部：标题与总开关同排，开关紧随标题。 */
 .dim-ah-arHead { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
 .dim-ah-arTitle { margin: 0; font-size: var(--dsw-font-m-18-font-size); line-height: var(--dsw-font-m-18-line-height); font-weight: var(--dsw-font-m-18-font-weight); color: var(--dsw-alias-label-primary); }
 .dim-ah-arDirtyTag { font-size: var(--dsw-font-xxxs-11-font-size); line-height: var(--dsw-font-xxxs-11-line-height); }
@@ -462,8 +462,36 @@ const STYLES = `
    外观全部来自 ui-primitives 的 Tag，这里只钉住不被挤。 */
 .dim-ah-arEditorMasqueradeBadge { flex: none; white-space: nowrap; }
 
-/* 「添加模型」入口所在行。 */
-.dim-ah-arAddEntry { display: flex; align-items: center; gap: 8px; }
+/* 自动模型定义列表尾部的全宽添加块，与宿主 addBlock 的 12px 间距一致。 */
+.dim-ah-arAddDefinition { display: flex; margin-top: 12px; }
+/* 候选列表尾部的全宽添加行，与宿主 addBlock 的 12px 间距一致。 */
+.dim-ah-arAddEntry { display: flex; width: 100%; margin-top: 4px; }
+/* 自动路由两个添加入口复刻宿主「添加模型提供商」按钮的视觉。 */
+.dim-ah-arAddButton {
+  box-sizing: border-box;
+  height: 44px;
+  min-width: 180px;
+  flex: 1 1 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 0 14px;
+  border: .5px dashed var(--dsw-alias-border-l3);
+  border-radius: var(--dsw-radius-lg);
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  font-size: 14px;
+  line-height: 22px;
+  cursor: pointer;
+}
+.dim-ah-arAddButton:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover); }
+.dim-ah-arAddButton:disabled { opacity: .4; cursor: default; }
+.dim-ah-arAddButton:focus-visible {
+  box-shadow: 0 0 0 2px var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+  outline: none;
+}
 
 /* 「自动路由」导航项的图标容器：与 .dim-ah-providerIcon 同形（尺寸 / 圆角 /
    投影都来自那一条），这里只换**背景色**。

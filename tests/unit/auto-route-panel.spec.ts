@@ -38,7 +38,7 @@
  * ```
  *
  * ⚠️ 没有「保存」按钮、也没有脏标记：编辑**就是**保存动作，中间态只留在本地。
- * 总开关与「添加自动模型」入口位于标题行；卡片内仍可添加候选，提交在途时由 `saving`
+ * 总开关位于标题行；列表/空态之后提供「添加自动模型」文字按钮，卡片内仍可添加候选，提交在途时由 `saving`
  * 置灰卡片内的输入与候选按钮。
  */
 
@@ -323,11 +323,6 @@ const elementsOf = (node: unknown): ElementNode[] => flatten(node).filter(isElem
 /** 按可见文本找**按钮**节点（`type === 'button'`）。 */
 function findButtonByText(node: unknown, text: string): ElementNode | undefined {
   return elementsOf(node).find((el) => el.type === 'button' && textsOf(el).includes(text))
-}
-
-/** 按无障碍名称查找 icon-only 按钮。 */
-function findButtonByLabel(node: unknown, label: string): ElementNode | undefined {
-  return elementsOf(node).find((el) => el.type === 'button' && el.props['aria-label'] === label)
 }
 
 /**
@@ -762,13 +757,13 @@ describe('AutoRoutePanel：挂载与总开关', () => {
     expect(cardsOf(tree)).toHaveLength(2)
   })
 
-  it('标题行含唯一开关与加号入口，且均带可发现说明', async () => {
+  it('标题行含唯一开关，列表底部提供文字添加入口', async () => {
     const { rpcCall } = makeRpc()
     const tree = await settle(client.AutoRoutePanel, panelProps(rpcCall), client.hooks, true)
     const header = elementsOf(tree).find((el) => el.props.className === 'dim-ah-arHead')
     expect(header, '自动路由面板缺少标题行').toBeDefined()
     const headerChildren = header!.children.filter(isElement)
-    expect(headerChildren, '标题、Switch、加号应在同一行').toHaveLength(3)
+    expect(headerChildren, '标题与 Switch 应在同一行').toHaveLength(2)
     const heading = headerChildren.find((el) => el.type === 'h2')
     expect(textsOf(heading!).join(''), '标题行 h2 文案错误').toBe('自动路由')
     expect(textsOf(header!).join(''), 'Switch 不应额外渲染可见标签文字').toBe('自动路由')
@@ -782,22 +777,48 @@ describe('AutoRoutePanel：挂载与总开关', () => {
     expect(elementsOf(tree).filter((el) => el.props.role === 'switch'), '面板应只有一个开关')
       .toHaveLength(1)
 
-    const addButton = findButtonByLabel(tree, '添加自动模型')
-    expect(addButton, '加号入口必须带「添加自动模型」无障碍名称').toBeDefined()
-    expect(addButton!.props.className, '加号按钮应采用方形图标按钮尺寸').toBe('dim-ah-iconBtn')
-    expect(textsOf(addButton!).join(''), '添加入口应为纯图标按钮').toBe('')
-    const addAnchor = headerChildren.find((el) => el.props['data-tooltip'] === '添加自动模型')
-    expect(addAnchor, '加号按钮缺少悬停说明').toBeDefined()
-    expect(elementsOf(addAnchor!).some((el) => el.props['aria-label'] === '添加自动模型'),
-      '加号按钮不在标题行内').toBe(true)
+    const addDefinition = elementsOf(tree).find((el) => el.props.className === 'dim-ah-arAddDefinition')
+    expect(addDefinition, '列表底部缺少「添加自动模型」入口区块').toBeDefined()
+    const addButton = findButtonByText(addDefinition!, '添加自动模型')
+    expect(addButton, '底部入口按钮应显示「添加自动模型」').toBeDefined()
+    expect(addButton!.props.className, '底部入口按钮应采用统一添加按钮样式')
+      .toBe('dim-ah-arAddButton')
+    const content = elementsOf(tree).find((el) => el.props.className === 'dim-ah-arList')
+    expect(content, '已有定义时应渲染自动模型列表').toBeDefined()
+    expect(elementsOf(tree).indexOf(addDefinition!), '添加入口应位于列表之后')
+      .toBeGreaterThan(elementsOf(tree).indexOf(content!))
+
+    // 图标是 Button 的第一个子节点；在本 spec 的图标替身中展开后为 null，
+    // 故从未展开的 React 元素树核对它确实是 IconPlusOutlineRegular。
+    const rawTree = client.hooks.__renderComponent(client.AutoRoutePanel, panelProps(rpcCall))
+    const rawAddButton = elementsOf(rawTree).find((el) =>
+      typeof el.type === 'function'
+      && (el.type as { name?: string }).name === 'Button'
+      && textsOf(el).includes('添加自动模型'))
+    expect(rawAddButton, '底部入口应渲染 Button 组件').toBeDefined()
+    expect(rawAddButton!.children.some((child) =>
+      isElement(child)
+      && typeof child.type === 'function'
+      && (child.type as { name?: string }).name === 'IconPlusOutlineRegular',
+    ), '添加入口按钮应带 plus 图标 child').toBe(true)
 
     expect(elementsOf(tree).some((el) => el.props.className === 'dim-ah-arSwitchRow'),
       '不应再渲染独立开关行').toBe(false)
     expect(elementsOf(tree).some((el) => el.props.className === 'dim-ah-arSwitchLabel'),
       '不应再渲染重复开关文字').toBe(false)
     expect(elementsOf(tree).some((el) => el.props.className === 'dim-ah-arSaveRow'),
-      '不应再渲染底部添加行').toBe(false)
-    expect(findButtonByText(tree, '添加自动模型'), '底部文字按钮应已移除').toBeUndefined()
+      '不应再渲染已废弃的保存行').toBe(false)
+
+    // loading 阶段只显示读取占位，不应提前渲染底部入口。
+    client.hooks.__reset()
+    const loadingTree = expandTree(
+      client.hooks.__renderComponent(client.AutoRoutePanel, panelProps(rpcCall)),
+      client.hooks,
+    )
+    expect(elementsOf(loadingTree).find((el) => el.props.className === 'dim-ah-arAddDefinition'),
+      'loading 阶段不应渲染底部添加入口区块').toBeUndefined()
+    expect(findButtonByText(loadingTree, '添加自动模型'),
+      'loading 阶段不应渲染「添加自动模型」按钮').toBeUndefined()
   })
 
   it('关闭状态下面板主体仍可见可编辑（用户可以先配好再开）', async () => {
@@ -807,8 +828,8 @@ describe('AutoRoutePanel：挂载与总开关', () => {
     // 关键：关闭**不是**禁用编辑器 —— 两张卡片、名称输入、两个添加按钮全在。
     expect(cardsOf(tree), '关闭状态下编辑器不该消失').toHaveLength(2)
     expect(nameInputOf(cardsOf(tree)[0]!).props.value).toBe('快速')
-    expect(findButtonByLabel(tree, '添加自动模型'), '关闭状态下仍应能添加自动模型').toBeDefined()
-    expect(findButtonByText(tree, '添加模型'), '关闭状态下仍应能添加候选').toBeDefined()
+    expect(findButtonByText(tree, '添加自动模型'), '关闭状态下仍应能添加自动模型').toBeDefined()
+    expect(findButtonByText(tree, '添加候选模型'), '关闭状态下仍应能添加候选').toBeDefined()
   })
 
   it('切开关发 autoroute.set { enabled }，并以**宿主返回值**回填（不做乐观更新）', async () => {
@@ -886,7 +907,7 @@ describe('AutoRoutePanel：草稿编辑（修改即保存）', () => {
   it('添加自动模型：新定义 name 为「自动模型 N」且不与已有定义重名', async () => {
     const { calls, rpcCall } = makeRpc()
     let tree = await settle(client.AutoRoutePanel, panelProps(rpcCall), client.hooks, true)
-    ;(findButtonByLabel(tree, '添加自动模型')!.props.onClick as () => void)()
+    ;(findButtonByText(tree, '添加自动模型')!.props.onClick as () => void)()
     tree = await settle(client.AutoRoutePanel, panelProps(rpcCall), client.hooks)
 
     const cards = cardsOf(tree)
@@ -904,8 +925,8 @@ describe('AutoRoutePanel：草稿编辑（修改即保存）', () => {
     const { rpcCall } = makeRpc()
     let tree = await settle(client.AutoRoutePanel, panelProps(rpcCall), client.hooks, true)
     const card = cardsOf(tree)[0]!
-    // 卡片内的「添加模型」按钮；「添加自动模型」入口现位于标题行。
-    ;(findButtonByText(card, '添加模型')!.props.onClick as () => void)()
+    // 卡片内的「添加候选模型」按钮；「添加自动模型」入口位于列表底部。
+    ;(findButtonByText(card, '添加候选模型')!.props.onClick as () => void)()
     tree = await settle(client.AutoRoutePanel, panelProps(rpcCall), client.hooks)
 
     const rows = rowsInCard(cardsOf(tree)[0]!)
@@ -932,7 +953,7 @@ describe('AutoRoutePanel：草稿编辑（修改即保存）', () => {
     const sets = () => calls.filter((c) => c.method === 'autoroute.set')
 
     // 第一步：加一行空候选（provider / model 都是空串占位）。
-    ;(findButtonByText(cardsOf(tree)[0]!, '添加模型')!.props.onClick as () => void)()
+    ;(findButtonByText(cardsOf(tree)[0]!, '添加候选模型')!.props.onClick as () => void)()
     for (let i = 0; i < 12; i++) await Promise.resolve()
     tree = await settle(client.AutoRoutePanel, panelProps(rpcCall), client.hooks)
     expect(rowsInCard(cardsOf(tree)[0]!), '新候选应当已经进了本地草稿（不是被前端拦下）').toHaveLength(2)
@@ -993,7 +1014,7 @@ describe('AutoRoutePanel：草稿编辑（修改即保存）', () => {
   it('供应商未选时模型下拉禁用（无从选起），并带引导提示', async () => {
     const { rpcCall } = makeRpc()
     let tree = await settle(client.AutoRoutePanel, panelProps(rpcCall), client.hooks, true)
-    ;(findButtonByText(cardsOf(tree)[0]!, '添加模型')!.props.onClick as () => void)()
+    ;(findButtonByText(cardsOf(tree)[0]!, '添加候选模型')!.props.onClick as () => void)()
     tree = await settle(client.AutoRoutePanel, panelProps(rpcCall), client.hooks)
 
     // 禁用态长在弹窗里的锚点上（行上已没有下拉），故先点开这一行。
@@ -1193,14 +1214,14 @@ describe('AutoRoutePanel：自动保存流（修改即保存）', () => {
   it('entries 为空的定义允许存在于草稿且**不触发提交**（中间态跳过，防线在服务端）', async () => {
     const { calls, rpcCall } = makeRpc()
     let tree = await settle(client.AutoRoutePanel, panelProps(rpcCall), client.hooks, true)
-    ;(findButtonByLabel(tree, '添加自动模型')!.props.onClick as () => void)()
+    ;(findButtonByText(tree, '添加自动模型')!.props.onClick as () => void)()
     for (let i = 0; i < 12; i++) await Promise.resolve()
     tree = await settle(client.AutoRoutePanel, panelProps(rpcCall), client.hooks)
-    // 空 entries 的定义照样渲染出卡片与「添加模型」入口，没有任何前端拦截。
+    // 空 entries 的定义照样渲染出卡片与「添加候选模型」入口，没有任何前端拦截。
     const card = cardsOf(tree)[2]!
     expect(rowsInCard(card)).toHaveLength(0)
     expect(textsOf(card).join('\n'), '卡片头不再显示条目数').not.toContain('个模型条目')
-    expect(findButtonByText(card, '添加模型'), '空定义仍要能加候选').toBeDefined()
+    expect(findButtonByText(card, '添加候选模型'), '空定义仍要能加候选').toBeDefined()
     // 修改即保存的合法性闸：中间态不提交（提交必被服务端拒，白报错）。
     expect(calls.filter((c) => c.method === 'autoroute.set'), '空定义中间态不该触发提交').toHaveLength(0)
   })
