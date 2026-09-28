@@ -524,6 +524,7 @@ async function openEditor(
   cardIndex: number,
   rowIndex: number,
 ): Promise<unknown> {
+  tree = await expandCard(tree, rpcCall, cardIndex)
   const row = rowsInCard(cardsOf(tree)[cardIndex]!)[rowIndex]!
   ;(entryTextOf(row).props.onClick as () => void)()
   for (let i = 0; i < 12; i++) await Promise.resolve()
@@ -581,10 +582,55 @@ function entryValuesOf(card: ElementNode): Array<{ provider: string; model: stri
   })
 }
 
-/** 一张卡片内的名称输入框。 */
-function nameInputOf(card: ElementNode): ElementNode {
-  const input = elementsOf(card).find((el) => el.type === 'input')
-  if (input === undefined) throw new Error('卡片里找不到名称输入框（Input 未接线？）')
+/** 一张卡片内的名称文本按钮。 */
+function nameButtonOf(card: ElementNode): ElementNode {
+  const button = elementsOf(card).find((el) => hasClass(el, 'dim-ah-arNameButton'))
+  if (button === undefined) throw new Error('卡片里找不到名称按钮（名称编辑入口未接线？）')
+  return button
+}
+
+/** 一张卡片内的名称可见文本。 */
+function nameTextOf(card: ElementNode): string {
+  return textsOf(nameButtonOf(card)).join('')
+}
+
+/** 一张卡片内的折叠按钮。 */
+function foldButtonOf(card: ElementNode): ElementNode {
+  const button = elementsOf(card).find((el) => hasClass(el, 'dim-ah-arFoldButton'))
+  if (button === undefined) throw new Error('卡片里找不到折叠按钮（折叠入口未接线？）')
+  return button
+}
+
+/** 展开一张默认折叠的卡片；已展开时保持幂等。 */
+async function expandCard(tree: unknown, rpcCall: unknown, cardIndex: number): Promise<unknown> {
+  const card = cardsOf(tree)[cardIndex]
+  if (card === undefined) throw new Error(`第 ${cardIndex} 张自动模型卡片不存在`)
+  const foldButton = foldButtonOf(card)
+  if (foldButton.props['aria-expanded'] !== true) {
+    ;(foldButton.props.onClick as () => void)()
+    for (let i = 0; i < 12; i++) await Promise.resolve()
+    return settle(client.AutoRoutePanel, panelProps(rpcCall), client.hooks)
+  }
+  return tree
+}
+
+/** 打开指定自动模型的重命名弹窗并返回重渲染后的树。 */
+async function openDefinitionNameEditor(
+  tree: unknown,
+  rpcCall: unknown,
+  cardIndex: number,
+): Promise<unknown> {
+  const card = cardsOf(tree)[cardIndex]
+  if (card === undefined) throw new Error(`第 ${cardIndex} 张自动模型卡片不存在`)
+  ;(nameButtonOf(card).props.onClick as () => void)()
+  for (let i = 0; i < 12; i++) await Promise.resolve()
+  return settle(client.AutoRoutePanel, panelProps(rpcCall), client.hooks)
+}
+
+/** 重命名弹窗里的名称输入框。 */
+function renameInputOf(tree: unknown): ElementNode {
+  const input = elementsOf(tree).find((el) => el.type === 'input' && el.props['aria-label'] === '自动模型名称')
+  if (input === undefined) throw new Error('重命名弹窗里找不到自动模型名称输入框')
   return input
 }
 
@@ -823,13 +869,32 @@ describe('AutoRoutePanel：挂载与总开关', () => {
 
   it('关闭状态下面板主体仍可见可编辑（用户可以先配好再开）', async () => {
     const { rpcCall } = makeRpc({ config: { ...CONFIG, enabled: false } })
-    const tree = await settle(client.AutoRoutePanel, panelProps(rpcCall), client.hooks, true)
+    let tree = await settle(client.AutoRoutePanel, panelProps(rpcCall), client.hooks, true)
     expect(switchOf(tree).props['aria-checked']).toBe(false)
-    // 关键：关闭**不是**禁用编辑器 —— 两张卡片、名称输入、两个添加按钮全在。
+    // 关键：关闭**不是**禁用编辑器 —— 两张卡片仍在，名称按钮始终可用。
     expect(cardsOf(tree), '关闭状态下编辑器不该消失').toHaveLength(2)
-    expect(nameInputOf(cardsOf(tree)[0]!).props.value).toBe('快速')
+    expect(nameTextOf(cardsOf(tree)[0]!)).toBe('快速')
+    tree = await expandCard(tree, rpcCall, 0)
     expect(findButtonByText(tree, '添加自动模型'), '关闭状态下仍应能添加自动模型').toBeDefined()
-    expect(findButtonByText(tree, '添加候选模型'), '关闭状态下仍应能添加候选').toBeDefined()
+    expect(findButtonByText(cardsOf(tree)[0]!, '添加候选模型'), '关闭状态下仍应能添加候选').toBeDefined()
+  })
+
+  it('自动模型卡片默认全折叠，展开后再折叠会移除候选内容', async () => {
+    const { rpcCall } = makeRpc()
+    let tree = await settle(client.AutoRoutePanel, panelProps(rpcCall), client.hooks, true)
+    const cards = cardsOf(tree)
+    expect(cards).toHaveLength(2)
+    expect(cards.every((card) => foldButtonOf(card).props['aria-expanded'] === false), '初始状态必须全部折叠').toBe(true)
+    expect(cards.every((card) => rowsInCard(card).length === 0), '折叠态不应渲染候选行').toBe(true)
+
+    tree = await expandCard(tree, rpcCall, 0)
+    expect(foldButtonOf(cardsOf(tree)[0]!).props['aria-expanded']).toBe(true)
+    expect(rowsInCard(cardsOf(tree)[0]!), '展开后应渲染候选行').toHaveLength(1)
+
+    ;(foldButtonOf(cardsOf(tree)[0]!).props.onClick as () => void)()
+    tree = await settle(client.AutoRoutePanel, panelProps(rpcCall), client.hooks)
+    expect(foldButtonOf(cardsOf(tree)[0]!).props['aria-expanded']).toBe(false)
+    expect(rowsInCard(cardsOf(tree)[0]!), '再次折叠后候选行应从树中移除').toHaveLength(0)
   })
 
   it('切开关发 autoroute.set { enabled }，并以**宿主返回值**回填（不做乐观更新）', async () => {
@@ -890,11 +955,14 @@ describe('AutoRoutePanel：草稿编辑（修改即保存）', () => {
     const { calls, rpcCall } = makeRpc()
     let tree = await settle(client.AutoRoutePanel, panelProps(rpcCall), client.hooks, true)
 
-    typeInto(nameInputOf(cardsOf(tree)[0]!), '极速')
+    // 名称已不是卡片内联输入：先点名称按钮打开重命名弹窗，再操作弹窗 Input。
+    tree = await openDefinitionNameEditor(tree, rpcCall, 0)
+    typeInto(renameInputOf(tree), '极速')
     for (let i = 0; i < 12; i++) await Promise.resolve()
     tree = await settle(client.AutoRoutePanel, panelProps(rpcCall), client.hooks)
 
-    expect(nameInputOf(cardsOf(tree)[0]!).props.value, '改名应当反映在草稿上').toBe('极速')
+    expect(renameInputOf(tree).props.value, '改名应当反映在重命名草稿上').toBe('极速')
+    expect(nameTextOf(cardsOf(tree)[0]!), '卡片名称按钮应同步显示新名').toBe('极速')
     // 修改即保存：编辑**立即**写服务端（合法配置才提交，改名始终合法）。
     const set = calls.filter((c) => c.method === 'autoroute.set')
     expect(set, '改名应当立即触发 autoroute.set').toHaveLength(1)
@@ -912,7 +980,7 @@ describe('AutoRoutePanel：草稿编辑（修改即保存）', () => {
 
     const cards = cardsOf(tree)
     expect(cards, '添加后应当有三张卡片').toHaveLength(3)
-    const names = cards.map((card) => nameInputOf(card).props.value)
+    const names = cards.map((card) => nameTextOf(card))
     // 已有定义叫「快速」「强力」，故默认名从「自动模型 3」起。
     expect(names[2]).toBe('自动模型 3')
     expect(new Set(names).size, '默认名不得与已有定义重名（写路径按唯一性校验）').toBe(names.length)
@@ -924,6 +992,7 @@ describe('AutoRoutePanel：草稿编辑（修改即保存）', () => {
   it('添加候选：新条目三级全空占位，用户逐级选', async () => {
     const { rpcCall } = makeRpc()
     let tree = await settle(client.AutoRoutePanel, panelProps(rpcCall), client.hooks, true)
+    tree = await expandCard(tree, rpcCall, 0)
     const card = cardsOf(tree)[0]!
     // 卡片内的「添加候选模型」按钮；「添加自动模型」入口位于列表底部。
     ;(findButtonByText(card, '添加候选模型')!.props.onClick as () => void)()
@@ -950,6 +1019,7 @@ describe('AutoRoutePanel：草稿编辑（修改即保存）', () => {
     // 只测首尾两步的话，「每次编辑都提交、失败就报错」的实现照样能绿。
     const { calls, rpcCall } = makeRpc()
     let tree = await settle(client.AutoRoutePanel, panelProps(rpcCall), client.hooks, true)
+    tree = await expandCard(tree, rpcCall, 0)
     const sets = () => calls.filter((c) => c.method === 'autoroute.set')
 
     // 第一步：加一行空候选（provider / model 都是空串占位）。
@@ -1014,6 +1084,7 @@ describe('AutoRoutePanel：草稿编辑（修改即保存）', () => {
   it('供应商未选时模型下拉禁用（无从选起），并带引导提示', async () => {
     const { rpcCall } = makeRpc()
     let tree = await settle(client.AutoRoutePanel, panelProps(rpcCall), client.hooks, true)
+    tree = await expandCard(tree, rpcCall, 0)
     ;(findButtonByText(cardsOf(tree)[0]!, '添加候选模型')!.props.onClick as () => void)()
     tree = await settle(client.AutoRoutePanel, panelProps(rpcCall), client.hooks)
 
@@ -1059,14 +1130,17 @@ describe('AutoRoutePanel：草稿编辑（修改即保存）', () => {
     ;(confirm.props.onClick as () => void)()
     tree = await settle(client.AutoRoutePanel, panelProps(rpcCall), client.hooks)
     expect(cardsOf(tree), '确认后应当删掉一张卡片').toHaveLength(1)
-    expect(nameInputOf(cardsOf(tree)[0]!).props.value, '剩下的是第二个定义').toBe('强力')
+    expect(nameTextOf(cardsOf(tree)[0]!), '剩下的是第二个定义').toBe('强力')
   })
 })
 
 describe('AutoRoutePanel：思考档位（按需拉取 + 缓存）', () => {
   it('按需拉 autoroute.model-info，同一 provider+model 只拉一次', async () => {
     const { calls, rpcCall } = makeRpc()
-    await settle(client.AutoRoutePanel, panelProps(rpcCall), client.hooks, true)
+    let tree = await settle(client.AutoRoutePanel, panelProps(rpcCall), client.hooks, true)
+    // 候选列表默认折叠：先展开两张卡片，行挂载后才会按需拉档位。
+    tree = await expandCard(tree, rpcCall, 0)
+    tree = await expandCard(tree, rpcCall, 1)
 
     const infoCalls = calls.filter((c) => c.method === 'autoroute.model-info')
     // 三个不同的 provider+model（dsh/deepseek-v4 在两个定义里各出现一次）。
@@ -1177,7 +1251,8 @@ describe('AutoRoutePanel：自动保存流（修改即保存）', () => {
   it('合法修改立即提交整组 models，成功后无错误行、草稿保留', async () => {
     const { calls, rpcCall } = makeRpc()
     let tree = await settle(client.AutoRoutePanel, panelProps(rpcCall), client.hooks, true)
-    typeInto(nameInputOf(cardsOf(tree)[0]!), '极速')
+    tree = await openDefinitionNameEditor(tree, rpcCall, 0)
+    typeInto(renameInputOf(tree), '极速')
     for (let i = 0; i < 12; i++) await Promise.resolve()
     tree = await settle(client.AutoRoutePanel, panelProps(rpcCall), client.hooks)
 
@@ -1191,7 +1266,8 @@ describe('AutoRoutePanel：自动保存流（修改即保存）', () => {
 
     // 成功后：无错误行、草稿保留（本地值即提交值，宿主返回值一致时不覆盖）。
     expect(errorLinesOf(tree), '提交成功不该有错误行').toHaveLength(0)
-    expect(nameInputOf(cardsOf(tree)[0]!).props.value).toBe('极速')
+    expect(renameInputOf(tree).props.value, '重命名弹窗应保留宿主返回的名称').toBe('极速')
+    expect(nameTextOf(cardsOf(tree)[0]!), '卡片名称按钮应显示提交后的名称').toBe('极速')
   })
 
   it('提交被拒：显示服务端中文错误、草稿原样保留，下一次合法修改再次提交', async () => {
@@ -1199,7 +1275,8 @@ describe('AutoRoutePanel：自动保存流（修改即保存）', () => {
     const serverMessage = '自动模型『快速』缺少模型条目（至少一条 provider + model）'
     const { calls, rpcCall } = makeRpc({ setFails: serverMessage })
     let tree = await settle(client.AutoRoutePanel, panelProps(rpcCall), client.hooks, true)
-    typeInto(nameInputOf(cardsOf(tree)[0]!), '极速')
+    tree = await openDefinitionNameEditor(tree, rpcCall, 0)
+    typeInto(renameInputOf(tree), '极速')
     for (let i = 0; i < 12; i++) await Promise.resolve()
     tree = await settle(client.AutoRoutePanel, panelProps(rpcCall), client.hooks)
 
@@ -1208,7 +1285,8 @@ describe('AutoRoutePanel：自动保存流（修改即保存）', () => {
     const errors = errorLinesOf(tree)
     expect(errors.join('\n'), '提交被拒必须显示服务端的中文错误原文').toContain(serverMessage)
     // 草稿**保留**：用户改了一堆东西，失败不该把它清掉。
-    expect(nameInputOf(cardsOf(tree)[0]!).props.value, '提交失败后草稿必须保留').toBe('极速')
+    expect(renameInputOf(tree).props.value, '提交失败后重命名草稿必须保留').toBe('极速')
+    expect(nameTextOf(cardsOf(tree)[0]!), '提交失败后卡片名称也必须保留').toBe('极速')
   })
 
   it('entries 为空的定义允许存在于草稿且**不触发提交**（中间态跳过，防线在服务端）', async () => {
@@ -1217,7 +1295,8 @@ describe('AutoRoutePanel：自动保存流（修改即保存）', () => {
     ;(findButtonByText(tree, '添加自动模型')!.props.onClick as () => void)()
     for (let i = 0; i < 12; i++) await Promise.resolve()
     tree = await settle(client.AutoRoutePanel, panelProps(rpcCall), client.hooks)
-    // 空 entries 的定义照样渲染出卡片与「添加候选模型」入口，没有任何前端拦截。
+    // 空 entries 的定义照样渲染出卡片；展开后才挂载「添加候选模型」入口。
+    tree = await expandCard(tree, rpcCall, 2)
     const card = cardsOf(tree)[2]!
     expect(rowsInCard(card)).toHaveLength(0)
     expect(textsOf(card).join('\n'), '卡片头不再显示条目数').not.toContain('个模型条目')
@@ -1278,7 +1357,7 @@ describe('AutoRoutePanel：拖拽排序', () => {
     const { calls, rpcCall } = makeRpc()
     const props = panelProps(rpcCall)
     let tree = await settle(client.AutoRoutePanel, props, client.hooks, true)
-    expect(cardsOf(tree).map((c) => nameInputOf(c).props.value)).toEqual(['快速', '强力'])
+    expect(cardsOf(tree).map((c) => nameTextOf(c))).toEqual(['快速', '强力'])
 
     // 把第一张卡片拖到第二张的**下半区**（clientY 160 > 分界线 140）⇒ 落到其后。
     tree = await drag(tree, props, cardsOf, [
@@ -1287,7 +1366,7 @@ describe('AutoRoutePanel：拖拽排序', () => {
       { on: 1, type: 'drop', clientY: 160 },
     ])
 
-    expect(cardsOf(tree).map((c) => nameInputOf(c).props.value), '拖拽后顺序应当翻转').toEqual(['强力', '快速'])
+    expect(cardsOf(tree).map((c) => nameTextOf(c)), '拖拽后顺序应当翻转').toEqual(['强力', '快速'])
     // 修改即保存：拖拽落定是合法编辑，drop 后立即写服务端。
     const set = calls.filter((c) => c.method === 'autoroute.set')
     expect(set, '拖拽排序应当立即触发 autoroute.set').toHaveLength(1)
@@ -1321,6 +1400,9 @@ describe('AutoRoutePanel：拖拽排序', () => {
     const { calls, rpcCall } = makeRpc()
     const props = panelProps(rpcCall)
     let tree = await settle(client.AutoRoutePanel, props, client.hooks, true)
+    // 候选列表默认折叠：展开两张卡片，分别验证目标候选可拖及另一张候选保持不变。
+    tree = await expandCard(tree, rpcCall, 0)
+    tree = await expandCard(tree, rpcCall, 1)
     const card = cardsOf(tree)[1]!
     expect(entryValuesOf(card).map((v) => v.provider), '初始：dsh 在前、codearts 在后')
       .toEqual(['dsh', 'codearts'])
@@ -1360,6 +1442,8 @@ describe('AutoRoutePanel：拖拽排序', () => {
     const { rpcCall } = makeRpc()
     const props = panelProps(rpcCall)
     let tree = await settle(client.AutoRoutePanel, props, client.hooks, true)
+    // 候选列表默认折叠：展开目标卡片后才能验证候选行事件不会冒泡到卡片。
+    tree = await expandCard(tree, rpcCall, 1)
     const card = cardsOf(tree)[1]!
     const sourceRow = rowsInCard(card)[0]!
 
@@ -1404,7 +1488,9 @@ describe('AutoRoutePanel：拖拽排序', () => {
     const { rpcCall } = makeRpc({
       config: { enabled: false, models: [{ id: 'only', name: '唯一', entries: [{ provider: 'dsh', model: 'deepseek-v4' }] }] },
     })
-    const tree = await settle(client.AutoRoutePanel, panelProps(rpcCall), client.hooks, true)
+    let tree = await settle(client.AutoRoutePanel, panelProps(rpcCall), client.hooks, true)
+    // 候选列表默认折叠：展开唯一卡片后才能断言单条候选的拖拽属性。
+    tree = await expandCard(tree, rpcCall, 0)
     expect(cardsOf(tree)[0]!.props.draggable, '单张卡片不该可拖').toBeUndefined()
     expect(rowsInCard(cardsOf(tree)[0]!)[0]!.props.draggable, '单条候选不该可拖').toBeUndefined()
   })
@@ -1575,13 +1661,13 @@ describe('AccountHubPage：左侧「自动路由」选项卡', () => {
   })
 
   /**
-   * 真机缺陷锚点：「自动模型名称编辑框右边和删除按钮重叠」。
+   * 真机缺陷锚点：「自动模型重命名弹窗正文的 Input 宽度溢出」。
    *
-   * 根因不在栅格列宽，而在 `box-sizing`：`className` 由 ui-primitives 的 `Input`
+   * 根因不在卡头栅格列宽，而在 `box-sizing`：`className` 由 ui-primitives 的 `Input`
    * 透传给**外层 wrapper span**（不是内层 `<input>`），该 wrapper 自带 8px 水平
    * 内边距 + 0.5px 描边；宿主全站又没有 border-box 重置，于是默认 content-box 下
-   * `width: 100%` 只算内容宽，wrapper 实宽 = 栅格列宽 + 17px，越过了 8px 的栅格
-   * gap 压到右邻的删除按钮上。
+   * `width: 100%` 只算内容宽，wrapper 实宽 = 弹窗正文可用宽度 + 17px，导致
+   * Input wrapper 溢出弹窗正文宽度。
    *
    * 这条规则**少一个属性就是那个真机缺陷**，所以逐字钉住 —— 与
    * `credits-capabilities.spec.ts` / `account-consumption-panel.spec.ts` 里

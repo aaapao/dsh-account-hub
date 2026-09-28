@@ -357,22 +357,35 @@ const STYLES = `
 .dim-ah-arCard[data-dropBefore="true"]::before { content: ''; position: absolute; left: 0; right: 0; top: -6px; height: 3px; border-radius: 2px; background: var(--dsw-alias-brand-primary); }
 .dim-ah-arCard[data-dropAfter="true"]::after { content: ''; position: absolute; left: 0; right: 0; bottom: -6px; height: 3px; border-radius: 2px; background: var(--dsw-alias-brand-primary); }
 
-/* 卡片头：拖拽柄 + 序号 + 名称输入 + 删除；输入框优先压缩。
-   列数必须与 DOM 子节点一一对应（6cb46c9 删「条目数」徽标时收缩过一次），
-   尾部多出的空轨道不报错，只在行右缘留下约一个 gap 的死空白。 */
-.dim-ah-arCardHead { display: grid; grid-template-columns: 16px max-content minmax(0, 1fr) max-content; align-items: center; gap: 8px; }
-.dim-ah-arCardHead[data-drag-enabled="false"] { grid-template-columns: max-content minmax(0, 1fr) max-content; }
+/* 卡片头：拖拽柄 + 序号 + 名称按钮 + 折叠按钮 + 删除按钮；名称列优先压缩。
+   列数必须与 DOM 子节点一一对应，名称列吃满剩余宽度。 */
+.dim-ah-arCardHead { display: grid; grid-template-columns: 16px max-content minmax(0, 1fr) max-content max-content; align-items: center; gap: 8px; }
+.dim-ah-arCardHead[data-drag-enabled="false"] { grid-template-columns: max-content minmax(0, 1fr) max-content max-content; }
 /* 序号徽标：与账号卡片的 .dim-ah-accountOrder 同义（顺序即降级顺序），
    但这里显示的是**定义**序号，故另起一个类名而不是复用。 */
 .dim-ah-arOrder { min-width: 18px; padding: 0 5px; border-radius: 6px; font-size: var(--dsw-font-xxxs-11-font-size); line-height: var(--dsw-font-xxxs-11-line-height); font-weight: var(--dsw-font-xxxs-strong-11-font-weight); text-align: center; color: var(--dsw-alias-label-secondary); background: var(--dsw-alias-bg-module-platform); }
-/* 名称输入优先占用剩余空间；删除按钮维持自身宽度。
-   ⚠️ box-sizing 不是装饰，是本行**防重叠的必要条件**，删掉即回归真机缺陷：
-   这个类名落在 ui-primitives 那个 Input 的**外层 wrapper span** 上
-   （className 由 Input 透传给 wrapper，不是给内层 input），而那个 wrapper
-   自带 8px 左右内边距 + 0.5px 描边；宿主全站又**没有**通盘 box-sizing 重置。
-   故默认 content-box 下 width: 100% 只算内容宽，wrapper 实宽 = 栅格列宽
-   + 17px，越过 8px 的栅格 gap 向右压到相邻的删除按钮上 —— 真机报障
-   「自动模型名编辑框右边和删除按钮重叠」正是这一条。 */
+/* 自动模型名称是纯文本按钮：默认不画边框与底色，长名称在名称列内省略。
+   min-width: 0 与卡头的 minmax(0, 1fr) 配套，保证名称不会把折叠 / 删除按钮挤出卡片。
+   悬停提示由 withHoverTitle 负责，按钮本身只保留可点击的文本观感。 */
+.dim-ah-arNameButton { box-sizing: border-box; width: 100%; min-width: 0; max-width: 100%; padding: 4px 8px; border: none; border-radius: 6px; background: transparent; color: var(--dsw-alias-label-primary); font: inherit; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+.dim-ah-arNameButton:hover:not(:disabled) { background: transparent; color: var(--dsw-alias-label-primary); }
+.dim-ah-arNameButton:disabled { cursor: not-allowed; opacity: .4; }
+.dim-ah-arNameButton:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary)); }
+
+/* 折叠按钮：28px 方形与卡头其它小型操作对齐，图标颜色与状态都走 token。 */
+.dim-ah-arFoldButton { box-sizing: border-box; flex: none; width: 28px; min-width: 28px; height: 28px; padding: 0; display: inline-flex; align-items: center; justify-content: center; border: none; border-radius: 6px; background: transparent; color: var(--dsw-alias-label-tertiary); cursor: pointer; }
+.dim-ah-arFoldButton:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
+.dim-ah-arFoldButton:disabled { cursor: not-allowed; opacity: .4; }
+.dim-ah-arFoldButton:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary)); }
+.dim-ah-arFoldButton > * { transform: rotate(-90deg); transition: transform var(--ds-transition-duration-fast) var(--ds-ease-in-out); }
+.dim-ah-arFoldButton[data-open="1"] > * { transform: rotate(0deg); }
+@media (prefers-reduced-motion: reduce) {
+  .dim-ah-arFoldButton > * { transition: none; }
+}
+
+/* 名称编辑弹窗的输入框优先占用剩余空间；弹窗输入类名落在 ui-primitives
+   Input 的外层 wrapper 上，必须保留 border-box / width / min-width 三项，避免真机
+   窄窗口下内容盒额外膨胀后与相邻操作重叠。 */
 .dim-ah-arNameInput { box-sizing: border-box; width: 100%; min-width: 0; }
 
 /* 候选列表（卡片内），间距按 12/8/4 节奏收敛。 */

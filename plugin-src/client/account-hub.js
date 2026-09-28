@@ -2923,6 +2923,10 @@ function AutoRoutePanel({ rpcCall }) {
   // 当前打开的候选编辑目标（`{ defId, index }`）；弹窗全面板只挂一份，关闭即完成
   // （修改已即时保存，无保存按钮）。
   const [editing, setEditing] = React.useState(null);
+  // 当前打开的自动模型名称编辑目标；与候选编辑弹窗的 `editing` 状态独立。
+  const [editingName, setEditingName] = React.useState(null);
+  // 候选列表展开状态只属于本地界面，默认全部折叠，不进入草稿或保存载荷。
+  const [expandedDefIds, setExpandedDefIds] = React.useState(() => new Set());
   /**
    * 拖拽状态（定义卡片与候选行**共用一份**，靠 `kind` + `defId` 区分作用域）。
    *
@@ -3149,7 +3153,21 @@ function AutoRoutePanel({ rpcCall }) {
 
   const removeDefinition = (defId) => {
     editDraft(prev => prev.filter(def => def.id !== defId));
+    setExpandedDefIds(prev => {
+      if (!prev.has(defId)) return prev;
+      const next = new Set(prev);
+      next.delete(defId);
+      return next;
+    });
+    if (editingName?.defId === defId) setEditingName(null);
   };
+
+  const toggleDefinition = (defId) => setExpandedDefIds(prev => {
+    const next = new Set(prev);
+    if (next.has(defId)) next.delete(defId);
+    else next.add(defId);
+    return next;
+  });
 
   const addEntry = (defId) => {
     editDraft(prev => prev.map(def => (def.id === defId
@@ -3356,6 +3374,8 @@ function AutoRoutePanel({ rpcCall }) {
   /** 渲染一个自动模型定义卡片（普通函数，不是组件：它要直接闭包面板状态）。 */
   const renderDefinition = (def, index) => {
     const cardDrag = dragPropsFor('def', null, def.id, draft.length);
+    const isOpen = expandedDefIds.has(def.id);
+    const nameLabel = def.name === '' ? '（未命名）' : def.name;
     return React.createElement('div', {
       key: def.id,
       className: 'dim-ah-arCard',
@@ -3378,14 +3398,23 @@ function AutoRoutePanel({ rpcCall }) {
             }, '⠿')
           : null,
         React.createElement('span', { className: 'dim-ah-arOrder' }, String(index + 1)),
-        React.createElement(Input, {
-          className: 'dim-ah-arNameInput',
-          value: def.name,
+        React.createElement(Button, {
+          variant: 'ghost',
+          size: 'sm',
+          className: 'dim-ah-arNameButton',
+          'aria-label': `编辑自动模型名称：${nameLabel}`,
           disabled: saving,
-          'aria-label': '自动模型名称',
-          placeholder: '自动模型名称',
-          onChange: (event) => renameDefinition(def.id, event?.target?.value ?? ''),
-        }),
+          onClick: () => setEditingName({ defId: def.id }),
+        }, nameLabel),
+        React.createElement(Button, {
+          variant: 'ghost',
+          size: 'sm',
+          className: 'dim-ah-arFoldButton',
+          'aria-expanded': isOpen,
+          'aria-label': isOpen ? '折叠候选模型列表' : '展开候选模型列表',
+          'data-open': isOpen ? '1' : '0',
+          onClick: () => toggleDefinition(def.id),
+        }, React.createElement(IconChevronDownOutlineRegular, { size: 14 })),
         React.createElement(Button, {
           variant: 'outline',
           size: 'sm',
@@ -3393,28 +3422,31 @@ function AutoRoutePanel({ rpcCall }) {
           disabled: saving,
           onClick: () => setPendingDelete(def.id),
         }, '删除')),
-      React.createElement('div', { className: 'dim-ah-arEntries' },
-        def.entries.map((entry, entryIndex) => React.createElement(AutoRouteEntryRow, {
-          key: entryIndex,
-          entry,
-          index: entryIndex,
-          catalog,
-          busy: saving,
-          drag: dragPropsFor('entry', def.id, String(entryIndex), def.entries.length),
-          // 档位拉取留在行上（见 AutoRouteEntryRow 的说明）；三个下拉的挂载点是弹窗。
-          onNeedEffort: requestEfforts,
-          onEdit: (rowIndex) => setEditing({ defId: def.id, index: rowIndex }),
-          onRemove: (rowIndex) => removeEntry(def.id, rowIndex),
-        })),
-        React.createElement('div', { className: 'dim-ah-arAddEntry' },
-          React.createElement(Button, {
-            variant: 'outline',
-            className: 'dim-ah-arAddButton',
-            disabled: saving,
-            onClick: () => addEntry(def.id),
-          },
-            React.createElement(IconPlusOutlineRegular, { size: 14 }),
-            '添加候选模型'))));
+      isOpen
+        ? React.createElement('div', { className: 'dim-ah-arEntries' },
+            def.entries.map((entry, entryIndex) => React.createElement(AutoRouteEntryRow, {
+              key: entryIndex,
+              entry,
+              index: entryIndex,
+              catalog,
+              busy: saving,
+              drag: dragPropsFor('entry', def.id, String(entryIndex), def.entries.length),
+              // 档位拉取留在行上（见 AutoRouteEntryRow 的说明）；三个下拉的挂载点是弹窗。
+              onNeedEffort: requestEfforts,
+              onEdit: (rowIndex) => setEditing({ defId: def.id, index: rowIndex }),
+              onRemove: (rowIndex) => removeEntry(def.id, rowIndex),
+            })),
+            React.createElement('div', { className: 'dim-ah-arAddEntry' },
+              React.createElement(Button, {
+                variant: 'outline',
+                className: 'dim-ah-arAddButton',
+                disabled: saving,
+                onClick: () => addEntry(def.id),
+              },
+                React.createElement(IconPlusOutlineRegular, { size: 14 }),
+                '添加候选模型'))
+          )
+        : null);
   };
 
   const pendingDefinition = pendingDelete === null
@@ -3439,6 +3471,11 @@ function AutoRoutePanel({ rpcCall }) {
         const entry = def ? def.entries[editing.index] : undefined;
         return entry === undefined ? null : { defId: editing.defId, index: editing.index, entry };
       })();
+
+  // 名称编辑目标同样每次从草稿现算，定义被删除或宿主返回新列表时静默关闭。
+  const editingDefinition = editingName === null
+    ? null
+    : draft.find(def => def.id === editingName.defId) || null;
 
   return React.createElement('section', { className: 'dim-ah-arPage', 'aria-label': '自动路由配置' },
     React.createElement('div', { className: 'dim-ah-arHead' },
@@ -3518,6 +3555,23 @@ function AutoRoutePanel({ rpcCall }) {
             }, '删除'),
           ],
         })
+      : null,
+    // 自动模型名称编辑弹窗：与候选编辑弹窗独立，修改即保存，关闭即完成。
+    editingDefinition !== null
+      ? React.createElement(Modal, {
+          open: true,
+          onClose: () => setEditingName(null),
+          title: '重命名自动模型',
+          closeLabel: '关闭重命名自动模型',
+          className: 'dim-ah-modal',
+        },
+          React.createElement(Input, {
+            className: 'dim-ah-arNameInput',
+            value: editingDefinition.name,
+            disabled: saving,
+            'aria-label': '自动模型名称',
+            onChange: (event) => renameDefinition(editingDefinition.id, event?.target?.value ?? ''),
+          }))
       : null,
     // 候选编辑弹窗：全面板只挂一份，编辑目标由 `editing` 指定（`{ defId, index }`）。
     // 目标被删掉 / 草稿被宿主返回值覆盖到没有这一条时静默不渲染 —— 与
