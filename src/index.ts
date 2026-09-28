@@ -18,6 +18,7 @@ import { TraeCnAuth } from './trae-cn-auth.js'
 import { QoderAuth } from './qoder-auth.js'
 import { AccountPool } from './account-pool.js'
 import { createAutoRouteRegistration, installAutoRouteEffortGuard } from './auto-route-adapter.js'
+import { maintainPatches } from './masquerade-patch.js'
 import { TurnKeyTracker } from './account-consumption.js'
 import { createContextTierRegistry } from './context-tiers.js'
 import { migrateProviderNames } from './provider-rename-migration.js'
@@ -1545,4 +1546,50 @@ export function apply(ctx: Context, config?: Config): void {
   ctx.effect(() => () => {
     clearInterval(balanceTimer)
   }, 'account-hub: consumption balance cache scheduler')
+
+  // ===== 客户端伪装补丁 · 自动维持层 =====
+  //
+  // 背景与判据链见 `docs/agents/client-masquerade-design.md` §3.8：伪装要落到宿主适配器
+  // 产物（`@deepseek-ai/dsh-llm-pi-ai/lib/index.js`）里，而那份产物会被 `tsc` 重建、
+  // DSH 升级、插件重装覆盖，故补丁必须能被**自动维持**。
+  //
+  // 本段只挂**触发点 ①（插件启动）与 ④（5 分钟定时器）**。触发点 ②（面板打开）与
+  // ③（保存配置）由 RPC 层直接调 `runMasqueradeMaintenance` —— 那两处按需跑单次检查，
+  // 不重复装钩子（`maintainPatches` 的注释里写明了这条分工）。
+  //
+  // ## 为什么必须等 `openStorage()`
+  //
+  // 判据链的第一问是「有没有任何条目配置了伪装头」，答案来自池的 `autoRoute`。在
+  // `openStorage()` 之前读到的是旧 settings 快照或空表 ⇒ 会判成「没配置」⇒ 走还原分支
+  // ⇒ **把用户正要用的补丁拆掉**。与自动路由注册、签到 sweep 是同一条顺序约束。
+  //
+  // ## 目标解析的两个来源
+  //
+  // profile 根目录的推法与 `createAccountHubUpdateDeps` 同款（产物落在
+  // `<profile>/node_modules/dsh-account-hub/lib/index.js`，上溯三级）。目标包在本机实测
+  // 只存在于**共享层**（`<dsh home>/profiles/node_modules/...`），profile 层候选在部分
+  // 机器上并不存在，故两个来源都给、由 `resolvePatchedTarget` 各自独立命中；
+  // 全缺 ⇒ 静默 `unavailable`（该 profile 没装外部适配器，不是错误）。
+  //
+  // ⚠️ 维持失败**绝不能让插件启动失败**：伪装整体不可用，其余功能照常。
+  const masqueradeProfileRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..')
+  const hostDshHomePath = ctx.dshHomePath
+  void pool.openStorage().then(() => {
+    try {
+      maintainPatches({
+        // 包一层以保住接收者：宿主解析器的实现可能依赖 `this`。
+        dshHomePath: hostDshHomePath === undefined ? undefined : (...segments) => hostDshHomePath(...segments),
+        profileRoot: masqueradeProfileRoot,
+        readAutoRouteConfig: () => pool.autoRouteConfig(),
+        logger: ctx.logger,
+        effect: (setup, label) => {
+          ctx.effect(setup, label)
+        },
+      })
+    } catch (error: unknown) {
+      ctx.logger.warn(`[account-hub] 客户端伪装补丁维持未能启动（该功能本次不可用）：${String(error)}`)
+    }
+  }).catch((error: unknown) => {
+    ctx.logger.warn(`[account-hub] 客户端伪装补丁维持未能等到 storage 就绪：${String(error)}`)
+  })
 }

@@ -69,6 +69,7 @@ import {
   createAutoRouteRuntime,
   demoteAutoRouteHead,
   rewriteMessagesForTarget,
+  type AccountHubMasqueradeCarrier,
   type AutoRouteConfig,
   type AutoRouteDefinition,
   type AutoRouteEntry,
@@ -397,6 +398,17 @@ export class AutoRouteAdapter extends LlmAdapter {
  *   **新增一个原本不存在的头**；但「聚合层只管把值带过去」这件事完全一样，故这里
  *   两行的写法也必须一样（少一行 = 用户在面板里配了 Originator 却什么都没发生，
  *   且没有任何报错）。
+ * - `accountHubMasquerade`：第三条内部通道
+ *   （{@link AccountHubMasqueradeCarrier.accountHubMasquerade}），缺省同样一个键都
+ *   不挂。它与前两条的**归属不同**：UA / Originator 的取值直接来自条目上的同名字段，
+ *   而本字段的来源是 `entry.masquerade`（一个对象）—— 条目上那份配置决定「宿主适配器
+ *   产物里那份补丁该不该打」（`src/masquerade-patch.ts` 的 `masqueradeConfigured`），
+ *   而**这里**这一行决定「打上补丁后，那次请求到底带不带 `x-codex-window-id`」。两层
+ *   缺一都会「配了却没生效且无报错」，故必须同时存在。
+ *
+ *   形态**逐字一致**：条目上的 `masquerade` 与这里的 `accountHubMasquerade` 都是
+ *   `{ windowId }`（内层注入的裸函数按 `masquerade.windowId` 结构性读取，且它无法
+ *   import 本插件模块，形状分叉不会有任何编译期报错）。
  */
 function forwardOptions(options: GenerateOptions, entry: AutoRouteEntry): GenerateOptions {
   return {
@@ -407,6 +419,7 @@ function forwardOptions(options: GenerateOptions, entry: AutoRouteEntry): Genera
     ...entry.effort === undefined ? {} : { reasoningEffort: ReasoningEffortId(entry.effort) },
     ...entry.userAgent === undefined ? {} : { accountHubUserAgent: entry.userAgent },
     ...entry.originator === undefined ? {} : { accountHubOriginator: entry.originator },
+    ...entry.masquerade === undefined ? {} : { accountHubMasquerade: entry.masquerade },
   }
 }
 

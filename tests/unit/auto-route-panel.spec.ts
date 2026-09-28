@@ -545,12 +545,12 @@ function editorRoot(tree: unknown): ElementNode | undefined {
   return elementsOf(tree).find((el) => el.props.className === 'dim-ah-modal')
 }
 
-/** 弹窗里的三个下拉，顺序即 DOM 顺序：供应商 → 模型 → 思考程度。 */
+/** 弹窗里的四个下拉，顺序即 DOM 顺序：供应商 → 模型 → 思考程度 → 客户端伪装。 */
 function editorMenus(tree: unknown): ElementNode[] {
   const root = editorRoot(tree)
   if (root === undefined) throw new Error('没有打开的候选编辑弹窗（弹窗未接线？）')
   const menus = menusIn(root)
-  if (menus.length !== 3) throw new Error(`候选编辑弹窗里应当有三个下拉，实际 ${menus.length} 个`)
+  if (menus.length !== 4) throw new Error(`候选编辑弹窗里应当有四个下拉，实际 ${menus.length} 个`)
   return menus
 }
 

@@ -9,7 +9,7 @@
  * ## 功能
  *
  * 用户在面板里定义若干**自动模型**，每个自动模型是一条**有序**的
- * `(provider, model, effort?, userAgent?, originator?)` 候选列表。插件把它们注册成一个虚拟 provider
+ * `(provider, model, effort?, userAgent?, originator?, masquerade?)` 候选列表。插件把它们注册成一个虚拟 provider
  * （id 固定为 {@link AUTO_ROUTE_PROVIDER_ID}），其模型列表 = 这些自动模型。
  * DSH 选中某个自动模型发起请求时，宿主按列表顺序取**队首**条目委派给真实
  * provider；**失败者被移到队尾**（跨请求持续），降级后新队首立刻顶替。
@@ -162,18 +162,25 @@ export function autoRouteExhaustedMessage(name: string): string {
  *
  * 故比较**内容**，且只比较会影响队列的字段（`enabled` + 定义的身份与条目顺序）。
  *
- * `userAgent` 与 `originator` 也算**影响出站行为**的字段：它们改的是这条候选发出去
- * 的请求头，改了就必须重建（否则用户在面板里改了 UA / Originator、请求却仍按旧值发，
- * 且没有任何提示）。
+ * `userAgent` / `originator` / `masquerade` 也算**影响出站行为**的字段：它们改的是这条
+ * 候选发出去的请求头，改了就必须重建（否则用户在面板里改了 UA / Originator、请求却仍
+ * 按旧值发，且没有任何提示）。`masquerade` 还多一层：它决定**宿主适配器产物里那份补丁
+ * 该不该打**（`src/masquerade-patch.ts` 的 `masqueradeConfigured`），漏进指纹会让
+ * 「改了伪装配置 ⇒ 队列不重建」与「补丁状态与配置不一致」同时发生。
  *
  * ## 为什么用 `JSON.stringify`
  *
  * 键序稳定：输入来自 {@link sanitizeAutoRouteConfig}，它按固定字段顺序新建对象
- * （`{provider, model}` / `{provider, model, effort}` / 带 `userAgent` / `originator`
- * 的形态都是显式字面量）。`effort` / `userAgent` / `originator` 的缺省都写成 `null`
- * 占位 —— `undefined` 会被 `JSON.stringify` 整键丢弃，从而与「键存在但值为 undefined」
- * 混为一谈，而两者在本配置里是不同语义（前者 = 该模型默认档 / 用 provider 默认 UA /
- * 不发 Originator 头，后者非法且已被读路径丢弃）。
+ * （`{provider, model}` / `{provider, model, effort}` / 带 `userAgent` / `originator` /
+ * `masquerade` 的形态都是显式字面量）。`effort` / `userAgent` / `originator` /
+ * `masquerade` 的缺省都写成 `null` 占位 —— `undefined` 会被 `JSON.stringify` 整键丢弃，
+ * 从而与「键存在但值为 undefined」混为一谈，而两者在本配置里是不同语义（前者 = 该模型
+ * 默认档 / 用 provider 默认 UA / 不发 Originator 头 / 关闭伪装，后者非法且已被读路径
+ * 丢弃）。
+ *
+ * `masquerade` 内部的 `windowId` 同样展开成**显式字面量**（`[windowId]`，而不是直接把
+ * 对象塞进去）：本函数是内容指纹，任何依赖「对象键序恰好稳定」的写法都是把判据押在
+ * 调用方的构造顺序上；展开成数组后键序问题在结构上就不存在了。
  *
  * 返回值是**不透明字符串**，只应用于相等比较，不要解析它。
  */
@@ -189,6 +196,7 @@ export function autoRouteConfigFacts(config: AutoRouteConfig): string {
         entry.effort ?? null,
         entry.userAgent ?? null,
         entry.originator ?? null,
+        entry.masquerade === undefined ? null : [entry.masquerade.windowId],
       ]),
     ]),
   ])
@@ -322,6 +330,65 @@ export interface AutoRouteEntry {
    * 只引用不重写。
    */
   originator?: string
+  /**
+   * 客户端伪装；**缺省 = 关闭伪装**（`masquerade` 键**缺席**即关闭，没有 `enabled` 布尔）。
+   *
+   * 与 `userAgent` / `originator` 同级（一条候选 = 一次具体出站请求），但**语义不同**：
+   * 那两个字段是**宿主适配器出站时**读的请求头取值；本字段是**宿主适配器产物里那份
+   * 补丁该不该打**的判据（`src/masquerade-patch.ts` 的 `masqueradeConfigured` 结构性
+   * 读的就是这里），补丁再把 `windowId` 写成 `x-codex-window-id`。
+   *
+   * 故它是**两层接线**：配置层（本文件）与出站层（`accountHubMasquerade` 载体字段，
+   * 见 `src/auto-route-adapter.ts` 的 `forwardOptions`）。两层缺一都会「配了却没生效
+   * 且无报错」。
+   *
+   * ## 取值纪律
+   *
+   * 只有 `windowId` 一个字段，且必须是非空字符串：它的唯一去处是 `x-codex-window-id`
+   * 的**整体取值**。判据在本文件（读路径 {@link readMasquerade} / 写路径
+   * {@link autoRouteMasqueradeProblem}）—— 与两个头覆写字段不同，`windowId` 没有
+   * 「另一份唯一真相源模块」，因为它不是任何既有 HTTP 头判据的复用对象。
+   *
+   * ⚠️ **预设名不持久化**（设计稿 §4.2 / §13 分叉 b）：`codex` 预设只是界面宏，把官方
+   * 真值填进 `userAgent` / `originator` 两格，出站身份只看那两个字段的实际值。故这里
+   * 没有 `preset` 字段 —— 存一个「不影响出站、只影响界面显示」的名，等于给将来埋一个
+   * 「预设名与实际值不一致」的静默漂移。
+   */
+  masquerade?: AutoRouteMasquerade
+}
+
+/**
+ * 条目级的客户端伪装配置。
+ *
+ * 只有 `windowId`（设计稿 §4.4）：请求体指纹、身份指令、`deviceId`、`bodySwitch` 等
+ * 字段**一律不实现、不发送**（§13 分叉 e）。
+ */
+export interface AutoRouteMasquerade {
+  /** `x-codex-window-id` 头的整体取值（非空字符串）。 */
+  windowId: string
+}
+
+/**
+ * 伪装通道的**载体字段形状**：随宿主 `GenerateOptions` 一起流到内层适配器的
+ * 插件私有字段（同 `AccountHubUserAgentCarrier` / `AccountHubOriginatorCarrier` 的
+ * 「内部通道」形态）。
+ *
+ * ## 为什么定义在这里，而不是像另两条通道那样单独一个模块
+ *
+ * 另两条通道各有一个模块（`src/account-hub-user-agent.ts` /
+ * `src/account-hub-originator.ts`），因为它们的取值是**宿主侧要发的 HTTP 头**，
+ * 需要 `applyAccountHub*` 这样的写入函数与一份共用的合法性判据。伪装没有对应的
+ * 宿主侧写入函数 —— 写头的那段代码是**注入到宿主适配器产物里的裸函数**
+ * （`src/masquerade-patch.ts` 的 `INJECTED_FUNCTION_SOURCE`），它**不能** import
+ * 本插件模块（那是个 rollup 产物，插 import 会破坏打包假设），故只能按
+ * `masquerade.windowId` **结构性读取**。
+ *
+ * 于是本类型的唯一价值是「让载体形状与 {@link AutoRouteMasquerade} 在类型上**同源**
+ * 而不是各写一份」：两者必须逐字节一致（一个决定配置怎么存、一个决定请求怎么发），
+ * 分叉不会有任何编译期报错。直接引用同一个类型就是这道防线的实现方式。
+ */
+export interface AccountHubMasqueradeCarrier {
+  accountHubMasquerade?: AutoRouteMasquerade
 }
 
 /** 一个「自动模型」：暴露给 DSH 的一个模型 + 它背后的有序候选列表。 */
@@ -371,6 +438,61 @@ function readText(raw: unknown): string | null {
 }
 
 /**
+ * 伪装块的**写路径判据**（唯一真相源）：`masquerade` 必须是**纯对象**、至多带
+ * `windowId`、且 `windowId` 必须是非空字符串。
+ *
+ * @returns 合法时 `null`，否则中文原因（调用方拼上「哪个条目」的前缀）。
+ *
+ * 与 {@link readMasquerade} **同源**：那边把非法处置成「当没配」，这边处置成「拒绝」，
+ * 判据本身只有这一份 —— 分叉就会出现「存得进去却读不出来」或反过来的静默丢失。
+ *
+ * ## 为什么 `masquerade` 是对象而不是裸字符串
+ *
+ * 它是一个**命名枚举载体**（设计稿 §4.4 / §13 分叉 e）：v1 只有 `windowId`，将来若要
+ * 加字段，裸字符串形态就得做一次类型迁移。且它与出站载体 `accountHubMasquerade` 的
+ * 形状**必须逐字一致**（`src/masquerade-patch.ts` 注入的裸函数按 `masquerade.windowId`
+ * 结构性读取），裸字符串会让两层形状分叉。
+ *
+ * ## 为什么未知键要拒绝，而不是忽略
+ *
+ * 与 `accountHubUserAgentProblem` 一族的纪律一致：静默忽略未知键 = 用户手打的字段
+ * 存了进去却永远不生效，且没有任何提示。拒绝才能让界面拿到「哪个键不认识」。
+ * （`readMasquerade` 侧则相反：脏键连整个 `masquerade` 块一起丢，见那边的说明。）
+ */
+export function autoRouteMasqueradeProblem(value: unknown): string | null {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return `必须是对象（形如 { windowId: "..." }），收到 ${describe(value)}`
+  }
+  const record = value as Record<string, unknown>
+  for (const key of Object.keys(record)) {
+    if (key !== 'windowId') return `含未知字段 ${key}（只支持 windowId）`
+  }
+  const windowId = record.windowId
+  if (windowId === undefined) return '缺少 windowId（必须是非空字符串）'
+  if (typeof windowId !== 'string') return `的 windowId 必须是字符串，收到 ${describe(windowId)}`
+  if (windowId.trim().length === 0) {
+    return '的 windowId 不能为空串（省略整个 masquerade = 关闭伪装）'
+  }
+  return null
+}
+
+/**
+ * 读取伪装块（**读路径**）：非法 ⇒ `undefined`（当没配）。
+ *
+ * ⚠️ 与两个头覆写字段的**关键差别**：它们坏掉时只丢**那个字段**，而这里坏掉时丢的是
+ * **整个 `masquerade` 块**（不是丢条目 —— 条目照留）。理由：`masquerade` 是个整体，
+ * 半截形态（`windowId` 是数字、或带未知键）没有任何可保留的部分；而丢条目更不可取，
+ * 那条候选的 `provider` / `model` 明明是对的（与 `userAgent` 同一条纪律）。
+ *
+ * 判据复用 {@link autoRouteMasqueradeProblem}，只在处置上分叉。
+ */
+function readMasquerade(value: unknown): AutoRouteMasquerade | undefined {
+  if (autoRouteMasqueradeProblem(value) !== null) return undefined
+  const windowId = (value as { windowId: string }).windowId.trim()
+  return { windowId }
+}
+
+/**
  * 读取一条候选条目。
  *
  * @returns 合法条目（新对象）；任一项非法时 `null` —— 调用方据此**只丢这一条**，
@@ -379,17 +501,18 @@ function readText(raw: unknown): string | null {
  * 非法形态（与写路径判据**同源**）：非对象、`provider` / `model` 空或非字符串、
  * `provider` 等于 {@link AUTO_ROUTE_PROVIDER_ID}（自引用）、`effort` 存在但为空串。
  *
- * ## 两个头覆写字段（`userAgent` / `originator`）是上述「丢整条」规则的**例外**
+ * ## 三个可选字段（`userAgent` / `originator` / `masquerade`）是上述「丢整条」规则的**例外**
  *
  * 它们坏掉时只丢**那个字段**，条目照留：`provider` / `model` 才是这条候选的实质，
  * 为一个可选的头覆写把整条候选从降级队列里抹掉（用户看到的是「我明明有三条候选，
  * 只试了两个就说全不可用」）代价明显更大。且判据与写路径共用一份
- * （{@link normalizeAccountHubUserAgent} / {@link normalizeAccountHubOriginator}）——
- * 这里只是把「非法」的处置从「拒绝」换成「当没配」，绝不会放一个非法值到出站头上去。
+ * （{@link normalizeAccountHubUserAgent} / {@link normalizeAccountHubOriginator} /
+ * {@link autoRouteMasqueradeProblem}）—— 这里只是把「非法」的处置从「拒绝」换成
+ * 「当没配」，绝不会放一个非法值到出站头上去。
  *
  * 归一后**不落空串**：`''` 与「键不存在」在 UA 上都表示「用该 provider 默认 UA」、
- * 在 Originator 上都表示「不发这个头」，两种形态存成两种样子只会让 `Object.keys`
- * 的断言与落盘 diff 出现无意义的噪声。
+ * 在 Originator 上都表示「不发这个头」、在 `masquerade` 上都表示「关闭伪装」，
+ * 两种形态存成两种样子只会让 `Object.keys` 的断言与落盘 diff 出现无意义的噪声。
  */
 function readEntry(raw: unknown): AutoRouteEntry | null {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null
@@ -399,6 +522,7 @@ function readEntry(raw: unknown): AutoRouteEntry | null {
     effort?: unknown
     userAgent?: unknown
     originator?: unknown
+    masquerade?: unknown
   }
   const provider = readText(value.provider)
   const model = readText(value.model)
@@ -412,7 +536,10 @@ function readEntry(raw: unknown): AutoRouteEntry | null {
     ? undefined
     : normalizeAccountHubOriginator(value.originator)
   const withOriginator = originator === undefined ? {} : { originator }
-  const headers = { ...withUserAgent, ...withOriginator }
+  // 伪装块：脏值丢**整块**（不是丢条目，见 {@link readMasquerade}）。
+  const masquerade = value.masquerade === undefined ? undefined : readMasquerade(value.masquerade)
+  const withMasquerade = masquerade === undefined ? {} : { masquerade }
+  const headers = { ...withUserAgent, ...withOriginator, ...withMasquerade }
   if (value.effort === undefined) return { provider, model, ...headers }
   const effort = readText(value.effort)
   if (effort === null) return null
@@ -421,7 +548,7 @@ function readEntry(raw: unknown): AutoRouteEntry | null {
 
 /**
  * 条目身份键（用于同定义内的去重）：`provider` + `model` + `effort` + `userAgent`
- * + `originator`（三个缺省各用空串占位）。
+ * + `originator` + `masquerade.windowId`（四个缺省各用空串占位）。
  *
  * ⚠️ **`userAgent` 必须进键**：同 provider + 同模型 + 同档位、只有 UA 不同的两条候选
  * 是**两条真实不同的出站请求**（后台按 UA 归因，用户就是靠它把同一模型分成两条通道的）。
@@ -432,9 +559,15 @@ function readEntry(raw: unknown): AutoRouteEntry | null {
  * 取值，两条只有它不同的候选也是两条不同的请求。差别只在语义 —— UA 是换掉一个既有的
  * 头、它默认用该 provider 的值；`originator` 是新增一个头、默认一个都不发（见
  * {@link AutoRouteEntry.originator}），但「进不进键」的判据与缺省无关。
+ *
+ * `masquerade.windowId` 同样进键（取 `?.windowId ?? ''`，与上面三个字段逐字同款）：
+ * 两条只有 `windowId` 不同的候选发出去的是**两个不同的 `x-codex-window-id`**，
+ * 上游按它归属会话窗口 —— 合并掉就等于用户配的第二条窗口 id 从未生效。且它与
+ * `autoRouteConfigFacts` 的取舍**必须同向**：那边进了指纹、这边不进键，就会出现
+ * 「指纹变了（运行时重建）但条目被去重吃掉（配置里只剩一条）」这种自相矛盾的形态。
  */
 function entryKey(entry: AutoRouteEntry): string {
-  return `${entry.provider}\u0000${entry.model}\u0000${entry.effort ?? ''}\u0000${entry.userAgent ?? ''}\u0000${entry.originator ?? ''}`
+  return `${entry.provider}\u0000${entry.model}\u0000${entry.effort ?? ''}\u0000${entry.userAgent ?? ''}\u0000${entry.originator ?? ''}\u0000${entry.masquerade?.windowId ?? ''}`
 }
 
 /**
@@ -492,7 +625,8 @@ function readDefinition(raw: unknown): AutoRouteDefinition | null {
  * | 定义 `id` 重复 | 保留第一个，丢弃后来者 |
  * | 条目非法（`provider`/`model` 空、自引用、`effort` 空串） | 丢弃该条目 |
  * | 条目 `userAgent` / `originator` 非法（非字符串 / 空串 / 超长 / 含控制字符） | **只丢该字段**，条目照留（见 {@link readEntry}） |
- * | 同定义内条目完全同形（provider + model + effort + userAgent + originator 全同） | 保留第一个，丢弃后来者 |
+ * | 条目 `masquerade` 非法（非对象 / 缺 `windowId` / `windowId` 非字符串或空串 / 含未知键） | **丢掉整个 `masquerade` 块**，条目照留（同上） |
+ * | 同定义内条目完全同形（provider + model + effort + userAgent + originator + masquerade 全同） | 保留第一个，丢弃后来者 |
  *
  * 返回**全新对象**（定义、条目逐层新建），调用方改返回值不会串到输入，反之亦然。
  */
@@ -531,9 +665,9 @@ export function sanitizeAutoRouteConfig(raw: unknown): AutoRouteConfig {
  * 两条刻意的例外：
  * 1. **`enabled` 缺省视为 `false` 可接受**（部分更新语义：客户端只提交 `models`
  *    时不该被迫回传开关）；
- * 2. **`userAgent` / `originator` 坏掉时**：读路径只丢该字段、写路径**整条拒绝** ——
- *    用户手打的值必须当场拿到「哪里不对」的中文原因，而不是保存成功后悄悄变成没配
- *    （见 {@link readEntry} 的说明）。
+ * 2. **`userAgent` / `originator` / `masquerade` 坏掉时**：读路径只丢该字段（`masquerade`
+ *    则整块丢）、写路径**整条拒绝** —— 用户手打的值必须当场拿到「哪里不对」的中文原因，
+ *    而不是保存成功后悄悄变成没配（见 {@link readEntry} 的说明）。
  *
  * 错误消息一律中文并指明「哪个定义 / 哪个字段」。
  */
@@ -579,6 +713,7 @@ export function assertValidAutoRouteConfig(config: unknown): void {
         effort?: unknown
         userAgent?: unknown
         originator?: unknown
+        masquerade?: unknown
       }
       if (readText(rawValue.provider) === null) {
         throw new Error(`${entryPosition}缺少 provider（必须是非空字符串）`)
@@ -607,6 +742,14 @@ export function assertValidAutoRouteConfig(config: unknown): void {
         const problem = accountHubOriginatorProblem(rawValue.originator)
         if (problem !== null) {
           throw new Error(`${entryPosition}的 originator ${problem}`)
+        }
+      }
+      if (rawValue.masquerade !== undefined) {
+        // 同款：判据来自本文件的 `autoRouteMasqueradeProblem`（该字段没有独立的判据模块，
+        // 因为它不是任何既有 HTTP 头判据的复用对象），文案形态与上面两个字段逐字对齐。
+        const problem = autoRouteMasqueradeProblem(rawValue.masquerade)
+        if (problem !== null) {
+          throw new Error(`${entryPosition}的 masquerade ${problem}`)
         }
       }
       const entry = readEntry(rawEntry)

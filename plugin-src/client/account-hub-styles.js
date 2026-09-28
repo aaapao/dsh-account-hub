@@ -440,6 +440,28 @@ const STYLES = `
    把右邻的重置按钮挤出弹窗；min-width: 0 保证超长值被裁在输入框里。 */
 .dim-ah-arEditorOriginatorInput { box-sizing: border-box; flex: 1 1 auto; width: 100%; min-width: 0; }
 
+/* 「客户端伪装」预设行：label + 下拉胶囊 + 行内徽标一条 flex 行，与上面两行共用
+   同一条 12px 节奏，label 复用 .dim-ah-arEditorLabel。
+   ⚠️ 它排在 UA / Originator **之后**：本行是那两格（外加一枚不可见的 windowId）的
+   一键填充宏，是「身份伪装」这一组的收口，不是与它们并列的第三个独立字段。
+   ⚠️ 本行没有输入框，故不需要 .dim-ah-arEditorMasqueradeInput 那条（设计文档
+   5.5 节把「输入框若有」列为条件项）；但下拉锚点仍需要一条后代规则，见下。
+   ⚠️ 本行是**高级配置**，不进候选行摘要文本（见 .dim-ah-arEntryText）。 */
+.dim-ah-arEditorMasqueradeRow { display: flex; align-items: center; gap: 12px; }
+/* 锚点在本行里**吃满剩余宽度**（与上面三行「胶囊铺满栅格列」同观感）。
+   不是为了好看：胶囊宽度若随文案自适应，「Codex 客户端」与「自定义」两档宽度不同，
+   切换预设时右邻徽标会跟着左右跳。让锚点吸走剩余空间，徽标就钉在行尾不动。
+   ⚠️ 与 .dim-ah-arEditorRow 那条同因（见该处说明）：后代规则必须排在
+   .dim-ah-selectAnchor 基础规则之后；且这里用 flex 而不是 width: 100%，
+   因为本行是 flex 行而不是栅格行 —— 写 width: 100% 会把徽标挤出弹窗。
+   ⚠️ 锚点基础规则没有 box-sizing，宿主全站也没有通盘重置：不显式声明 border-box，
+   它自带的 0 14px 内边距会加在宽度之外，同样把徽标挤出去。 */
+.dim-ah-arEditorMasqueradeRow .dim-ah-selectAnchor { box-sizing: border-box; flex: 1 1 auto; min-width: 0; max-width: 100%; justify-content: space-between; overflow: hidden; white-space: nowrap; }
+/* 徽标不参与压缩：窄弹窗下该被裁的是锚点里的预设名，徽标是这条信息里唯一
+   不可从别处推出的结论（补丁到底打上没有），不能跟着变形或被截成半个词。
+   外观全部来自 ui-primitives 的 Tag，这里只钉住不被挤。 */
+.dim-ah-arEditorMasqueradeBadge { flex: none; white-space: nowrap; }
+
 /* 「添加模型」入口所在行。 */
 .dim-ah-arAddEntry { display: flex; align-items: center; gap: 8px; }
 

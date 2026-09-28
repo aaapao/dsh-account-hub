@@ -135,12 +135,12 @@ describe('account-hub-rpc.ts —— 失败信封的唯一构造点', () => {
     //
     // ⚠️ 这里锁**行号**而不是只锁数量：数量相同但换了位置的构造点（例如把
     // `ok:false` 挪到信封层别处）必须让人显式改这一行才能通过。行号随上方任何
-    // 改动漂移（最近的漂移来自 `undetermined` 抑制表的引入 —— 它在模块头加了
-    // ~70 行，两处构造点整体下移同一个偏移量），改文件后照 `实际构造点行号`
-    // 那条断言的提示同步即可。
+    // 改动漂移（`undetermined` 抑制表在模块头加了 ~70 行；「客户端伪装」卡片在
+    // 模块头加了 ~155 行（常量 + 三个模块级辅助函数），两处构造点整体下移同一个
+    // 偏移量），改文件后照 `实际构造点行号` 那条断言的提示同步即可。
     // 两处**同增同减**才是「纯位移」的特征：若只有一处变，说明构造点被搬到了
     // 别处，那正是本断言要逼人显式确认的情形，别顺手照抄新数字。
-    expect(outside.map((site) => site.line)).toEqual([1897, 1909])
+    expect(outside.map((site) => site.line)).toEqual([2052, 2064])
     for (const site of outside) {
       // 从该构造点往前找最近的 `return`，那一段必须已经打开了 `reply(rpcId, `。
       const returnAt = SOURCE.lastIndexOf('return ', site.index)

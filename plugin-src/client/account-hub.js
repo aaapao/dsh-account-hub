@@ -2330,6 +2330,163 @@ const AUTO_ROUTE_UA_UNKNOWN_PLACEHOLDER = '该供应商无已知默认 UA';
  */
 const AUTO_ROUTE_ORIGINATOR_PLACEHOLDER = '默认不发此头';
 
+/**
+ * 「客户端伪装」预设下拉的**三个选项 id**。
+ *
+ * `''` 是**哨兵值**（与 {@link AUTO_ROUTE_DEFAULT_EFFORT} 同款）：它不是要写进配置的
+ * 值，而是「这条候选不带任何伪装字段」的界面态。
+ *
+ * ⚠️ 预设名**不持久化**（拍板决议：预设是 UI 宏）。存储里只有 `entry.userAgent` /
+ * `entry.originator` / `entry.masquerade` 三样**实际值**，下拉的当前态永远从这三样
+ * 现算（{@link autoRouteMasqueradePresetOf}）。故 `custom` 不是一个「可施加的动作」
+ * ——它是「两格值既不等于 codex 官方真值、又不全是空」这一**推导结果**，选中它只表示
+ * **保留现状**（见 `setEntryField` 的 `masquerade` 分支）。
+ */
+const AUTO_ROUTE_MASQUERADE_OFF = '';
+const AUTO_ROUTE_MASQUERADE_CODEX = 'codex';
+const AUTO_ROUTE_MASQUERADE_CUSTOM = 'custom';
+
+/** 下拉三个选项的显示文案（拍板决议：v1 只做 codex，**没有**置灰的 claude 项）。 */
+const AUTO_ROUTE_MASQUERADE_OFF_LABEL = '关闭';
+const AUTO_ROUTE_MASQUERADE_CODEX_LABEL = 'Codex 客户端';
+const AUTO_ROUTE_MASQUERADE_CUSTOM_LABEL = '自定义';
+
+/**
+ * Codex 客户端伪装的 **User-Agent 官方真值**（红线 R11：逐字拷贝，不得手抄重打）。
+ *
+ * ## 唯一真相源与来源核对
+ *
+ * 值**逐字拷贝**自本机 masquerade 仓库
+ * `C:\Users\gurio\Documents\GitHub\dsh-client-masquerade` 的 codex 预设块
+ * （`index.js` 的 `PRESETS.codex`；`host.body.js` 里同一份 bundle 半逐字相同）。
+ * 该仓 `patches/codex-fingerprint.js` 只承载 `engineHeader`（= `x-codex-window-id`）
+ * 与版本注记，`patches/patch-lib.js` 也不含 UA 字面量，故来源取 `index.js` 那一块。
+ *
+ * 已与用户真机实验值交叉核对，**完全一致**：版本 `0.153.4`、平台
+ * `Windows 10.0.26200`、架构 `x86_64`（注意**不是** `x64`）、尾部
+ * `dumb (codex_exec; 0.153.4)`。
+ *
+ * ⚠️ 少一个下划线 / 少一个字符就是上游 403，且**没有任何可归因的报错**。这不是
+ * 「大概对就行」的展示文案，而是出站身份标识：任何修改都必须回到上面那份真相源
+ * 重新逐字拷贝，绝不凭记忆重打。
+ */
+const AUTO_ROUTE_CODEX_UA = 'codex_exec/0.153.4 (Windows 10.0.26200; x86_64) dumb (codex_exec; 0.153.4)';
+
+/** Codex 客户端伪装的 `Originator` 官方真值（来源与纪律同上，逐字拷贝）。 */
+const AUTO_ROUTE_CODEX_ORIGINATOR = 'codex_exec';
+
+/**
+ * 「客户端伪装」下拉在**判不出当前态**时的兜底文案。
+ *
+ * 与 UA / Originator 两行的 placeholder 同源语义（回答「不动的话会是什么」= 默认关闭、
+ * 不写任何伪装字段），差别只在本行没有输入框：故它落在 `AutoRouteSelect` 的 `fallback`
+ * 上（`value` 为空 / 不在选项集里时的兜底显示），而不是某个 input 的 placeholder 属性。
+ */
+const AUTO_ROUTE_MASQUERADE_PLACEHOLDER = '默认关闭（不伪装）';
+
+/**
+ * 伪装补丁**已生效**（`masquerade.status` 的 `available && applied`）时的徽标文案。
+ *
+ * 下方四条与 {@link AUTO_ROUTE_MASQUERADE_PLACEHOLDER} 一起，是设计稿 §5.4 的五个
+ * 文案常量；`AUTO_ROUTE_MASQUERADE_UNAVAILABLE` 与宿主侧
+ * `src/account-hub-rpc.ts` 的 `MASQUERADE_UNAVAILABLE_REASON` **必须逐字同句**
+ * （宿主回这句话、面板照原样显示，两处是同一句字面量的两份拷贝）。
+ */
+const AUTO_ROUTE_MASQUERADE_APPLIED = '已生效';
+
+/** 补丁**不在场**且维持未报版本问题的徽标文案（多半是还没有任何条目配置伪装头）。 */
+const AUTO_ROUTE_MASQUERADE_NOT_PATCHED = '未打补丁';
+
+/**
+ * 补丁**因目标文件版本漂移而未写入**的徽标文案。
+ *
+ * ⚠️ 它同时是**服务端原因的前缀判据**：`src/masquerade-patch.ts` 在「调用点锚点零命中 /
+ * 多次命中」两条判据上抛出的中文原因都以这七个字开头（后接具体命中数与升级指引）。
+ * 判据用前缀而不是全等，是因为服务端那句话带可变的目标版本号；而客户端拿不到结构化
+ * 的失败分类（`masquerade.status` 只回一个 `reason` 字符串）。服务端若改了那句话的
+ * 开头，这里会**退化成**「未打补丁」——只是不够精确，不会报错，也不会把好状态说成坏的。
+ */
+const AUTO_ROUTE_MASQUERADE_VERSION_MISMATCH = '目标文件版本不匹配';
+
+/** 当前 profile **没装外部 provider 适配器**（`available === false`）时的徽标文案。 */
+const AUTO_ROUTE_MASQUERADE_UNAVAILABLE = '当前环境未安装外部 provider 适配器';
+
+/**
+ * 从一条候选的**实际字段值**推导「客户端伪装」下拉的当前态（预设名不持久化）。
+ *
+ * 判据（拍板决议，逐字）：
+ * - 两格值 === codex 官方真值 **且** 有 windowId ⇒ `'codex'`；
+ * - 两格值均为空 **且** 无 windowId ⇒ `''`（关闭）；
+ * - 其余一律 ⇒ `'custom'`。
+ *
+ * ⚠️ 「无 masquerade」在实现上按「**无有效 windowId**」判（缺键、非字符串、空串三者
+ * 同等看待）：空串 windowId 是服务端**写路径会拒**的非法值，把它算作「有伪装」会让
+ * 界面显示一个根本存不下去的态。
+ *
+ * ⚠️ 用户手改 UA / Originator 任一格后下拉**自动切到 `custom`**，靠的就是本函数是纯
+ * 推导：改了一格就不再同时等于两个真值，推导结果自然落到 `custom`，无需任何额外的
+ * 「手改监听」代码。
+ */
+function autoRouteMasqueradePresetOf(entry) {
+  const userAgent = typeof entry?.userAgent === 'string' ? entry.userAgent : '';
+  const originator = typeof entry?.originator === 'string' ? entry.originator : '';
+  const windowId = typeof entry?.masquerade?.windowId === 'string' ? entry.masquerade.windowId : '';
+  if (userAgent === AUTO_ROUTE_CODEX_UA && originator === AUTO_ROUTE_CODEX_ORIGINATOR && windowId !== '') {
+    return AUTO_ROUTE_MASQUERADE_CODEX;
+  }
+  if (userAgent === '' && originator === '' && windowId === '') return AUTO_ROUTE_MASQUERADE_OFF;
+  return AUTO_ROUTE_MASQUERADE_CUSTOM;
+}
+
+/**
+ * 生成一条候选的 `x-codex-window-id` 值（**逐条目、生成一次、此后不变**）。
+ *
+ * 优先 `crypto.randomUUID()`（拍板决议指定的形态）；运行时不提供它时（非安全上下文 /
+ * 老运行时）退化到手工拼一个 UUID v4 形态的串。退化路径是**结构性必需**而不是洁癖：
+ * `windowId` 非空串是服务端写路径的硬校验，拿不到 id 就等于「选 codex 后保存被拒」，
+ * 而用户从界面上完全看不出原因。
+ *
+ * ⚠️ 本函数**只在事件回调里调用**，绝不在模块顶层调用：`build:client` 的产物冒烟
+ * 沙箱里没有 `crypto` 全局（见 `plugin-src/client/build.mjs` 的 context），顶层调用
+ * 会让构建闸门直接炸。
+ */
+function newAutoRouteMasqueradeWindowId() {
+  const webCrypto = typeof crypto !== 'undefined' ? crypto : undefined;
+  if (webCrypto && typeof webCrypto.randomUUID === 'function') return webCrypto.randomUUID();
+  // 它只是会话窗口标识（不是密钥），无需密码学强度；形式对齐 UUID v4。
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (ch) => {
+    const random = Math.floor(Math.random() * 16);
+    const value = ch === 'x' ? random : ((random & 0x3) | 0x8);
+    return value.toString(16);
+  });
+}
+
+/**
+ * 把 `masquerade.status` 的响应收敛成行内徽标（`{ tone, text }`）或 `null`。
+ *
+ * 四档（设计稿 §5.4）：
+ * - `available && applied` ⇒ 绿「已生效」；
+ * - `available && !applied` 且原因以「目标文件版本不匹配」开头 ⇒ 黄「目标文件版本不匹配」；
+ * - `available && !applied` 其余 ⇒ 灰「未打补丁」；
+ * - `!available` ⇒ 灰「当前环境未安装外部 provider 适配器」。
+ *
+ * ⚠️ **`status` 未就绪 / 拉取失败 ⇒ 回 `null`（静默不渲染徽标）**：伪装状态是旁路
+ * 信息，查不到时既不该编一个结论，也不该让编辑弹窗显示成出错（`masquerade.status`
+ * 本身契约上永不抛错，这里是客户端侧的同类纪律）。
+ */
+function autoRouteMasqueradeBadgeOf(status) {
+  if (!status || typeof status !== 'object') return null;
+  if (status.available !== true) {
+    return { tone: 'neutral', text: AUTO_ROUTE_MASQUERADE_UNAVAILABLE };
+  }
+  if (status.applied === true) return { tone: 'success', text: AUTO_ROUTE_MASQUERADE_APPLIED };
+  const reason = typeof status.reason === 'string' ? status.reason : '';
+  if (reason.startsWith(AUTO_ROUTE_MASQUERADE_VERSION_MISMATCH)) {
+    return { tone: 'warning', text: AUTO_ROUTE_MASQUERADE_VERSION_MISMATCH };
+  }
+  return { tone: 'neutral', text: AUTO_ROUTE_MASQUERADE_NOT_PATCHED };
+}
+
 /** 自动模型定义 id 的自增种子（与时间戳一起保证同一次会话内不重复）。 */
 let autoRouteIdSeed = 0;
 
@@ -2521,7 +2678,9 @@ function AutoRouteEntryRow({
  * 候选长什么样」（模型(档位)-供应商）。它们是少数人才动的伪装项，混进摘要会把每行都
  * 撑长，而对「这条候选会走哪个模型」没有半点信息量。
  */
-function AutoRouteEntryEditor({ entry, index, catalog, effortInfo, busy, onSelectField, onClose }) {
+function AutoRouteEntryEditor({
+  entry, index, catalog, effortInfo, busy, masqueradeStatus, onSelectField, onClose,
+}) {
   const providerGroup = catalog.find(group => group.id === entry.provider);
   const providerOptions = catalog.map(group => ({ id: group.id, label: group.name }));
   const modelOptions = (providerGroup ? providerGroup.models : []).map(model => ({ id: model.id, label: model.name }));
@@ -2570,6 +2729,27 @@ function AutoRouteEntryEditor({ entry, index, catalog, effortInfo, busy, onSelec
    * 字段，只会让 placeholder 恒为空串（界面上是一个没有任何提示的空白框）。
    */
   const originator = typeof entry.originator === 'string' ? entry.originator : '';
+  /**
+   * 「客户端伪装」行的当前态与徽标。
+   *
+   * ⚠️ 当前态**从两格实际值现算**（{@link autoRouteMasqueradePresetOf}），不读任何
+   * 持久化的预设名 —— 预设名压根不落盘（预设是 UI 宏）。这也正是「用户手改 UA /
+   * Originator 后下拉自动切到自定义」的实现方式：没有手改监听，改了一格推导结果
+   * 自然就不再是 codex。
+   *
+   * ⚠️ 徽标来自 `masqueradeStatus`（面板持有的 `masquerade.status` 原样响应）；
+   * 未就绪 / 拉取失败时 {@link autoRouteMasqueradeBadgeOf} 回 `null`，整块不渲染
+   * ——旁路信息查不到不该让弹窗显示成出错。
+   */
+  const masqueradePreset = autoRouteMasqueradePresetOf(entry);
+  const masqueradeBadge = autoRouteMasqueradeBadgeOf(masqueradeStatus);
+  // 三个选项的 id 都是**预设 id**（不是存储字段名）；`''` 哨兵与「思考程度」的
+  // 「默认」同款：它不是要写进配置的值，而是「这条候选不带任何伪装字段」的界面态。
+  const masqueradeOptions = [
+    { id: AUTO_ROUTE_MASQUERADE_OFF, label: AUTO_ROUTE_MASQUERADE_OFF_LABEL },
+    { id: AUTO_ROUTE_MASQUERADE_CODEX, label: AUTO_ROUTE_MASQUERADE_CODEX_LABEL },
+    { id: AUTO_ROUTE_MASQUERADE_CUSTOM, label: AUTO_ROUTE_MASQUERADE_CUSTOM_LABEL },
+  ];
   const fieldRow = (label, select) => React.createElement('div', { className: 'dim-ah-arEditorRow' },
     React.createElement('span', { className: 'dim-ah-arEditorLabel' }, label),
     select);
@@ -2656,7 +2836,42 @@ function AutoRouteEntryEditor({ entry, index, catalog, effortInfo, busy, onSelec
           // 未覆写时无处可重置（本来就不发这个头）：禁用，而不是点了没反应。
           disabled: busy || originator === '',
           onClick: () => onSelectField('originator', ''),
-        }, '⟲'))));
+        }, '⟲')),
+      /**
+       * 第六行：客户端伪装（**本组三行的总控**，故排在 UA / Originator 之后）。
+       *
+       * 本行是「一键填官方真值」的**宏**，不是独立存储字段：下拉当前态由 UA / Originator
+       * / windowId 三样实际值现算（见 {@link autoRouteMasqueradePresetOf}），预设名永不
+       * 落盘。选「Codex 客户端」只是把官方 UA 与 originator 填进上面两格 + 生成一枚
+       * windowId；两格填完仍**可编辑**（不锁只读、无回退按钮），用户一改就靠推导自动
+       * 切回「自定义」。
+       *
+       * ⚠️ windowId **在界面上完全不可见**（没有输入框、没有按钮、没有提示）：它是
+       * 「同一个会话窗口」的标识，暴露出来只会诱导用户手改成一个上游没见过的值。它由
+       * `setEntryField` 在选预设时生成 / 复用并直接写进条目。
+       *
+       * ⚠️ 徽标是**旁路信息**（来自 `masquerade.status`），未就绪或查询失败时整块不渲染
+       * ——查不到补丁状态绝不该让编辑弹窗看起来像出错了。
+       */
+      React.createElement('div', { className: 'dim-ah-arEditorMasqueradeRow' },
+        React.createElement('span', { className: 'dim-ah-arEditorLabel' }, '客户端伪装'),
+        React.createElement(AutoRouteSelect, {
+          label: '客户端伪装',
+          options: masqueradeOptions,
+          value: masqueradePreset,
+          busy,
+          // 当前态恒是三者之一，fallback 只是「选项集意外不匹配」时的兜底文案。
+          fallback: AUTO_ROUTE_MASQUERADE_PLACEHOLDER,
+          onSelect: (id) => onSelectField('masqueradePreset', id),
+        }),
+        masqueradeBadge === null
+          ? null
+          : React.createElement(Tag, {
+            // tone 取 primitives 的既有词表（success / neutral / warning），与
+            // `data-tone` 那套（ok / warn / error / muted）是两套东西，不要混用。
+            tone: masqueradeBadge.tone,
+            className: 'dim-ah-arEditorMasqueradeBadge',
+          }, masqueradeBadge.text))));
 }
 
 /**
@@ -2705,6 +2920,20 @@ function AutoRoutePanel({ rpcCall }) {
   // model-info 缓存：`provider\0model` → `{ loading, efforts, defaultEffort?, defaultUserAgent? }`。
   // 名字仍叫 efforts（主用途是档位），但缓存项是**整份响应** —— 编辑弹窗的 UA 行也读它。
   const [efforts, setEfforts] = React.useState({});
+  /**
+   * `masquerade.status` 的**原样响应**（未就绪 / 失败时为 `null`）。
+   *
+   * 刻意只存原样响应、不在这里收敛成徽标文案：收敛逻辑是
+   * {@link autoRouteMasqueradeBadgeOf} 的单一职责，面板不替它下结论。也刻意**不存
+   * 「loading」态** —— 徽标是旁路信息，未就绪与查询失败在界面上同款（整块不渲染），
+   * 给一个转圈反而把「补丁状态」抬成了面板的主信息。
+   *
+   * ⚠️ 面板级拉取（一次挂载一次），**不是**每次开编辑弹窗拉一次：补丁状态与具体
+   * 候选条目无关，是整台机器的全局事实（目标文件是否已打补丁）。每开一次弹窗就
+   * 打一次 RPC，换不来任何新信息。宿主侧另有 5 分钟维护定时器负责让真实状态收敛
+   * （拍板决议 j），本徽标只呈现「此刻查到的事实」。
+   */
+  const [masqueradeStatus, setMasqueradeStatus] = React.useState(null);
   // 待确认删除的定义 id（`Modal` 二键确认，取代原生 confirm）。
   const [pendingDelete, setPendingDelete] = React.useState(null);
   // 当前打开的候选编辑目标（`{ defId, index }`）；弹窗全面板只挂一份，关闭即完成
@@ -2775,6 +3004,30 @@ function AutoRoutePanel({ rpcCall }) {
   }, [rpcCall]);
 
   /**
+   * 拉一次伪装补丁状态（编辑弹窗「客户端伪装」行的行内徽标读它）。
+   *
+   * ⚠️ **失败必须静默**：与目录 / 档位那两路相反，这里既不进 `saveError` 也不进
+   * 任何红色提示行。理由是这条信息的分量不同 —— 目录拉不到会让三个下拉全空（用户
+   * 会得出「没有任何模型可选」这个与真相相反的结论，非说不可），而补丁状态拉不到
+   * 只是**少一个旁路徽标**：UA / Originator 两格照填照改，配置照存。为它弹一行红字
+   * 等于把「本机没装外部 provider 适配器」这种完全正常的情况报成面板故障。
+   *
+   * 宿主侧 `masquerade.status` 本身**从不抛错**（判不出目标时回 `available:false`
+   * + 原因），故这里的 catch 只兜「RPC 通道本身断了」这一种情形，处置与「未就绪」
+   * 相同：保持 `null`，徽标整块不渲染。
+   */
+  const loadMasqueradeStatus = React.useCallback(async () => {
+    try {
+      const res = await rpcCall('masquerade.status', {});
+      if (!mounted.current) return;
+      setMasqueradeStatus(res ?? null);
+    } catch (caught) {
+      console.warn('[account-hub] load masquerade status failed:', caught);
+      // 刻意不 setMasqueradeStatus：保持 null，徽标不渲染。
+    }
+  }, [rpcCall]);
+
+  /**
    * 按需拉一个模型的档位与默认 UA（**同 provider+model 只拉一次**，见 effortsRef）。
    *
    * 宿主对无档位 / 未知模型 / 适配器抛错一律回 `{}`（那是**正常结果**，不是错误），
@@ -2817,6 +3070,8 @@ function AutoRoutePanel({ rpcCall }) {
     mounted.current = true;
     void loadConfig();
     void loadCatalog();
+    // 伪装补丁状态：与目录同批拉一次（面板级，不是每次开编辑弹窗拉一次）。
+    void loadMasqueradeStatus();
     return () => { mounted.current = false; };
     // 面板按 version 重挂载（见 AccountHubPage），故这里只需要跑一次。
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2938,12 +3193,68 @@ function AutoRoutePanel({ rpcCall }) {
    * UA 与 originator 是用户手打的伪装值，与走哪个模型无关，跟着清掉等于替用户丢配置。
    */
   const setEntryField = (defId, index, field, value) => {
+    /**
+     * 选「Codex 客户端」时要一并写入的那枚 `x-codex-window-id`。
+     *
+     * 必须在**进 updater 之前**算好：`editDraft` 的 updater 要求是纯函数（React 的
+     * StrictMode 会双跑、并发渲染下还可能被丢弃重算），而
+     * {@link newAutoRouteMasqueradeWindowId} 会读全局 `crypto` —— 放进 updater 里
+     * 就等于「重算一次」与「多生成一枚 id」等价。
+     *
+     * 复用判据（拍板决议 c：逐条目、生成一次、此后不变）：已有非空 windowId 就原样
+     * 带着走，只有从来没有过才新生成。**刻意不因为「重新选了一次预设」而换 id** ——
+     * 它是会话窗口标识，换来换去等于让上游看到一个新窗口。
+     */
+    let masqueradeWindowId = '';
+    if (field === 'masqueradePreset' && value === AUTO_ROUTE_MASQUERADE_CODEX) {
+      const def = draft.find(item => item.id === defId);
+      const current = def ? def.entries[index] : undefined;
+      const existing = current && typeof current.masquerade?.windowId === 'string'
+        ? current.masquerade.windowId
+        : '';
+      masqueradeWindowId = existing !== '' ? existing : newAutoRouteMasqueradeWindowId();
+    }
     editDraft(prev => prev.map(def => {
       if (def.id !== defId) return def;
       return {
         ...def,
         entries: def.entries.map((entry, i) => {
           if (i !== index) return entry;
+          /**
+           * 「客户端伪装」预设（**UI 宏**，预设名本身不落盘）。
+           *
+           * ⚠️ 本分支必须排在下方 effort 兜底**之前**：漏了它，`'masqueradePreset'`
+           * 会落进 `return { ...entry, effort: value }`，把 `'codex'` 写进 `effort`
+           * ——与真机缺陷「填 Originator 会填到思考程度里」是同一类错法（见下面
+           * originator 分支的注释）。
+           */
+          if (field === 'masqueradePreset') {
+            // 「关闭」= 三样一起清（伪装块 / UA / Originator）。这是本行**唯一**会主动
+            // 抹掉已填值的动作，语义等同把上面两格各自点一次「⟲」再摘掉 windowId
+            // ——服务端据此判「没有任何条目配伪装头」而自动还原补丁（拍板决议 f）。
+            if (value === AUTO_ROUTE_MASQUERADE_OFF) {
+              const cleared = { ...entry };
+              delete cleared.userAgent;
+              delete cleared.originator;
+              delete cleared.masquerade;
+              return cleared;
+            }
+            // 「自定义」= **一个键都不动**（保留现状）。它不是「可施加的动作」，而是
+            // 「两格值既不等于 codex 官方真值、又不全空」这一推导结果（见
+            // {@link autoRouteMasqueradePresetOf}）。尤其**不清** masquerade：用户手改
+            // UA / Originator 后下拉自动降级到本项，而 windowId 必须继续带出去 ——
+            // 手改两格值只该换身份字面量，不该顺带把窗口标识也丢了。
+            if (value === AUTO_ROUTE_MASQUERADE_CUSTOM) return entry;
+            // 「Codex 客户端」= 一键填入官方真值 + 带上 windowId（已在进 updater 前
+            // 算好，见上面的 masqueradeWindowId）。两格填完仍**可编辑**（不锁只读），
+            // 用户一改就靠推导自动切回「自定义」——故这里不需要任何「手改监听」。
+            return {
+              ...entry,
+              userAgent: AUTO_ROUTE_CODEX_UA,
+              originator: AUTO_ROUTE_CODEX_ORIGINATOR,
+              masquerade: { windowId: masqueradeWindowId },
+            };
+          }
           if (field === 'provider') return { provider: value, model: '' };
           if (field === 'model') return { provider: entry.provider, model: value };
           if (field === 'userAgent') {
