@@ -1,9 +1,10 @@
 # 外部 provider 客户端伪装 · 设计方案
 
-> **状态**：设计稿（未实现）。
-> **范围**：仅设计。本文不含实现代码、不含测试代码；不涉及对 `src/` / `tests/` / `plugin-src/` 的任何改动。
+> **状态**：已实现（**运输层方案**）。原「宿主磁盘补丁引擎」方案已**整体退役删除** —— 先读 §0.1 决策记录，再看其余章节。
+> **范围**：设计 + 落地记录。本文不含实现代码；`src/` / `tests/` / `plugin-src/` 的现状以仓库为准。
 > **证据基线**：`@deepseek-ai/dsh-llm-pi-ai@0.1.7-rc.1`、`@earendil-works/pi-ai@0.85.1`、本仓 `dsh-account-hub`（`ACCOUNT_HUB_SCHEMA_VERSION = 6`）。
-> 文中所有行号均针对上述版本，升级后必须重新核对（见 §9）。
+> 文中标注行号的段落均针对上述版本，升级后必须重新核对（见 §9）。
+> ⚠️ **§0.1 之后的正文里，凡涉及补丁引擎的旧描述都已改写为运输层口径，或就地标注「历史存档」**；读到未标注的补丁字眼即为文档缺陷，请以 `src/account-hub-masquerade-transport.ts` 为准。
 
 ---
 
@@ -11,8 +12,57 @@
 
 让「自动路由」的某条候选，在**转发到外部 provider**（如 `router-4` / 4router.net）时，
 按预设整体伪装成**某个官方客户端**的出站身份（UA + `Originator` + 客户端专属头），
-从而通过对方的客户端白名单闸门；实现方式是**对本机已安装的宿主适配器
-产物做一处极小、可自动维持、无配置时自动还原的文本补丁**，并在面板里给出一条预设下拉。
+从而通过对方的客户端白名单闸门；实现方式是**伪装运输层**：候选条目的伪装参数随
+「正在驱动的这一路请求」绑进 `AsyncLocalStorage`，`globalThis.fetch` 包装器在请求
+真正出网前，把三个头就地写进**这次请求自己的**头容器 —— **不写宿主磁盘上的任何文件**。
+面板里给出一条预设下拉。
+
+---
+
+## 0.1 决策记录：补丁引擎退役，改用 ALS + fetch 运输层
+
+> 本节是**决议记录**，不是设计草案。它回答「为什么上一版方案整份不要了」，
+> 以及「现在生效的到底是什么」。日期范围：**2026-09-28 前后这一轮**（与
+> `客户端伪装：自动路由候选可伪装成 Codex 客户端出站身份` 等提交同一批）。
+
+### 0.1.1 决策
+
+| 项 | 内容 |
+|---|---|
+| 决策 | 「客户端伪装**磁盘补丁引擎**」整体退役删除，改用**伪装运输层**（ALS 逐请求作用域 + `globalThis.fetch` 包装器） |
+| 退役范围 | `src/masquerade-patch.ts`（771 行）**已删除**；`tests/unit/masquerade-patch.spec.ts`（786 行 / 59 例）**已删除**；旧的状态面（`MASQUERADE_UNAVAILABLE_REASON` 等常量与「打没打上补丁」这类结论）**已删除** |
+| 新增 | `src/account-hub-masquerade-transport.ts`（ALS 存储 + `fetch` 包装器 + 三种头容器形态兼容）、`src/account-hub-window-id.ts`（第三条头通道 `x-codex-window-id` 的校验）、`tests/unit/masquerade-transport.spec.ts`（30 例）、`tests/unit/masquerade-transport-wiring.spec.ts`（15 例） |
+
+### 0.1.2 退役根因（这一条必须原样留存，它是整个决策的依据）
+
+旧引擎把补丁写进 **profile 侧 `node_modules` 的两条候选路径**；而宿主实际是按
+**installation-first 解析契约**，从**封印的 `app.asar` 内**加载 `rc.2` 副本 ——
+**两条路径集合永不相交**。
+
+后果不是「偶尔失效」，而是**结构性失效**：补丁永远维护着一个**没有人读的文件**。
+功能看起来在跑（文件被改了、状态面报「已生效」），实际出站的每一个字节都没变。
+这类缺陷无法靠「更勤的定时维持」或「更准的锚点匹配」修好 —— 维持得越勤，
+维护的那个死文件就越新。
+
+### 0.1.3 生效替代方案（现状）
+
+| 性质 | 落地处 | 含义 |
+|---|---|---|
+| **逐条目载荷** | `src/auto-route-adapter.ts` 的 `masqueradePayloadOf(entry)` | 载荷由**该条 entry** 现算，与 `forwardOptions` 的三个载体字段**同源**（同一份数据、两个消费点），不是另立真相源 |
+| **ALS 包消费侧** | `withMasqueradeAsyncIterable(payload, stream)` 套住 `for await` | async generator 的函数体在**恢复它的 `.next()`** 的上下文里执行，故上下文必须加在消费侧；加在创建点等于什么都没包，且**不会报任何错** |
+| **按需安装** | `ensureMasqueradeFetch()`，仅当载荷非 `undefined` 时调用 | 默认路径下 `globalThis.fetch` 与加本功能之前是**同一个对象** |
+| **默认路径零改动** | 包装器无载荷时 `base(input, init)` 原样转发 | 三个字段归一后全空的条目（绝大多数）出站逐字节不变 |
+| **不写宿主文件** | 全模块零文件 IO | 「锚点漂移 / 版本记账 / 5 分钟定时维持 / 零配置自动还原 / 与第三方补丁抢锚点」这一整类可失败状态**随之整体消失** |
+
+### 0.1.4 刻意保留的东西（别顺手删）
+
+- **公开 RPC 契约**：`masquerade.status` / `masquerade.apply` 仍在，二者共用冻结常量
+  `{ available: true, transport: 'als-fetch' }`；`masquerade.apply` 是**刻意保留的无副作用空操作**
+  （外部脚本/自动化可能仍在调用，删掉会让调用方把「不需要做任何事」误读成「功能坏了」）。
+- **配置面字段**：`entry.masquerade.windowId` 与面板上的预设下拉、`AUTO_ROUTE_*` 常量一律不动
+  （用户可见契约）。
+- **三个头的取值判据**：仍在 `src/account-hub-user-agent.ts` / `account-hub-originator.ts` /
+  `account-hub-window-id.ts` 各一份，运输层只调用它们的 `normalize*`，不复制校验。
 
 ---
 
@@ -46,10 +96,10 @@
 | G1 | 一条候选可**一键**切换成「Codex 客户端」形态 | 面板上有一个预设下拉，选完保存即生效，无需手填三个字段（UA / Originator / windowId） |
 | G2 | 伪装**默认关闭**，关闭时出站请求**逐字节不变** | 与 AGENTS.md「出站协议值不随 provider id / 显示名变化」红线一致 |
 | G3 | 伪装只作用于**配了它的那条候选**，不影响其余候选与七个直连 provider | 一条候选开了伪装，另一条没开，两者出站头互不影响 |
-| G4 | 补丁**可自动维持**：被 `tsc` 重建 / 包升级覆盖后能自愈，且自愈失败时**明确报错**而不是静默失效 | 面板上有状态徽标；日志有 warn |
-| G5 | 补丁在**无任何条目配置伪装头**时**自动还原**，还原后文件与打补丁前逐字节一致 | 见 §9.3、§13 分叉 f |
-| G6 | 与 `shabhui/dsh-client-masquerade` **互不破坏**（可同时安装、可各自单独还原） | 见 §8 |
-| G7 | 锚点不匹配时**绝不写入**（宁可功能不可用，也不产生半截补丁） | 见 §3.5 |
+| G4 | 伪装**不需要任何维持动作**：不写宿主文件 ⇒ 没有「被 `tsc` 重建抹掉」这回事 | 全模块零文件 IO（§3.1），不存在可失效的落盘状态 |
+| G5 | 与 `shabhui/dsh-client-masquerade` **互不破坏**：对方若在场（无论它改的是宿主文件还是别处），本设计都照常工作 | 本设计只在自己进程内包装 `globalThis.fetch`，与任何写宿主文件的机制天然正交（§7） |
+| G6 | 出站身份**不随 `provider id` / 显示名变化**（沿用 AGENTS.md 红线） | 载荷只由该条目显式配置的三个值算出，与 provider 命名无关 |
+| G7 | 失败方向是**少一个头**，绝不是**请求失败** | 单头异常就地吞掉、请求照常发出（§3.5） |
 
 ### 1.3 非目标
 
@@ -76,23 +126,25 @@
 │  forwardOptions(options, entry)                                    │
 │    + accountHubUserAgent     （既有通道，预设会写这个字段）          │
 │    + accountHubOriginator    （既有通道，预设会写这个字段）          │
-│    + accountHubMasquerade?   （★新通道，只带 codex 专属头）          │
+│    + accountHubMasquerade?   （载体字段，随 options 流进宿主适配器） │
+│  masqueradePayloadOf(entry)                                        │
+│    → 载荷（与上面三个载体字段同源，见 §0.1.3）                       │
 └───────────────────────────┬────────────────────────────────────────┘
+                            │ 载荷绑进 ALS，套住**消费侧**（for await）
                             │ ctx.llm.stream() 重入，宿主按 provider 选适配器
-┌─ 宿主适配器（dsh-llm-pi-ai，★本设计唯一的补丁落点） ───────────────┐
+┌─ 宿主适配器（dsh-llm-pi-ai，★本设计不碰它的任何文件） ─────────────┐
 │  streamWithSnapshot(options, snapshot)                             │
 │    headers: requestHeaders(profile.headers)                        │
-│         ↓ 补丁改为                                                   │
-│    headers: __dshAccountHubApplyMasquerade(                        │
-│               requestHeaders(profile.headers), options)            │
-│  （被注入的具名函数定义追加在文件末尾，函数声明提升）                  │
+│    （原样，无改写：UA / Originator 由内层适配器读载体字段覆写）        │
 └───────────────────────────┬────────────────────────────────────────┘
                             │ pi-ai streamSimple(model, context, options)
-┌─ pi-ai（@earendil-works/pi-ai，本设计 v1 不改） ───────────────────┐
+┌─ pi-ai（@earendil-works/pi-ai，本设计不改） ───────────────────────┐
 │  openai-responses.js: createClient(...)                            │
-│    Object.assign(headers, optionsHeaders)   ← 我们注入的头在此合并   │
+│    Object.assign(headers, optionsHeaders)                          │
 │  buildParams(...)                           ← 本设计不涉及（body 不做）│
 └───────────────────────────┬────────────────────────────────────────┘
+                            │ ★ 出网咽喉：globalThis.fetch 包装器在此读 ALS 载荷，
+                            │   把三个头就地写进**这次请求自己的** headers
                             │ HTTPS
                        4router.net /v1/responses
 ```
@@ -104,62 +156,59 @@
 | 1 | DSH 会话 | 用户选中的模型是自动模型 `auto-xxx`（provider = `auto-route`） |
 | 2 | `AutoRouteAdapter.stream()` | 取队首条目；`forwardOptions()` 把 `entry.userAgent` / `entry.originator` / `entry.masquerade` 挂成三个 `accountHub*` 载体字段 |
 | 3 | 宿主 `ctx.llm.stream()` 重入 | 按 `entry.provider`（如 `router-4`）选中 `PiAiAdapter`；多余字段原样带着走 |
-| 4 | `PiAiAdapter.streamWithSnapshot()` | `requestHeaders(profile.headers)` 先算出基线头（**含框架归属 UA**） |
-| 5 | ★补丁点 | 被注入的函数读 `options.accountHub*`，在基线头上做三件事：换 `user-agent`、设 `Originator`、设 `x-codex-window-id` |
-| 6 | pi-ai `createClient()` | `Object.assign(headers, optionsHeaders)` 把我们算好的头合进 OpenAI 客户端 |
-| 7 | pi-ai `buildParams()` | 本设计**不涉及**（body 伪装不做，见 §13 分叉 e） |
-| 8 | 出站 | 4router 闸门看到 Codex 形态 ⇒ 放行（若仍拒，见 §13 分叉 e 的残余风险） |
+| 4 | `AutoRouteAdapter.stream()` | `masqueradePayloadOf(entry)` 由**同一条 entry** 现算载荷；有载荷则 `ensureMasqueradeFetch()`（幂等） |
+| 5 | 运输层 · ALS | `withMasqueradeAsyncIterable(payload, upstream)` 套住 `for await` **消费侧**，把载荷绑在驱动这一路流的上下文上 |
+| 6 | `PiAiAdapter.streamWithSnapshot()` | `requestHeaders(profile.headers)` 先算出基线头（**含框架归属 UA**）；内层按需读两个载体字段覆写 `user-agent` / `Originator` |
+| 7 | pi-ai `createClient()` | `Object.assign(headers, optionsHeaders)` 把头合进 OpenAI 客户端 |
+| 8 | pi-ai `buildParams()` | 本设计**不涉及**（body 伪装不做，见 §13 分叉 e） |
+| 9 | ★出网咽喉 | `globalThis.fetch` 包装器读 ALS 载荷，把三个头**就地**写进**这次请求自己的** `init.headers` |
+| 10 | 出站 | 4router 闸门看到 Codex 形态 ⇒ 放行（若仍拒，见 §13 分叉 e 的残余风险） |
 
-### 2.3 为什么补丁落点是 `dsh-llm-pi-ai/lib/index.js` 而不是 `pi-ai/openai-responses.js`
+### 2.3 为什么挂在 `globalThis.fetch`（旧「补丁落点」取舍存档）
 
-这是本设计的**核心取舍**（见 §11 分叉 g）。三条事实：
+**现行方案**：出站请求头由内层真实适配器在它自己的 `send()` 里自建，聚合层
+（`src/auto-route-adapter.ts`）一点都碰不到；宿主 `ctx.llm.stream(options)` 也没有
+「带自定义头」这个入口。与其把三个值逐个穿进七个适配器（七处接线、七处漏接风险），
+不如在唯一的出网咽喉 —— `globalThis.fetch` —— 上统一改写。于是本设计**不写宿主任何
+文件**，装载随插件进程发生。
 
-1. **`profile.headers` 走不到 `user-agent`。** `requestHeaders()`（`lib/index.js:1732-1740`）
-   先把与 `attributionHeaders()` 键名（大小写不敏感）冲突的项**过滤掉**，再把归属头
-   `...attribution` 铺在后面 —— 归属头**赢**。所以往 profile 的 provider 段里写
-   `user-agent` 是**无效**的（被静默丢弃），这正是必须打补丁的唯一原因。
-   `originator` / `x-codex-window-id` **不在**归属头键名集合里，
-   **不需要**补丁就能透传（见 §11 分叉 h）。
-   （真机验证通过的是「UA + originator + `x-codex-window-id` + body」四者齐备的形态；
-   本设计只做**头三项**，body 不做 —— 如实记录，见 §13 分叉 e。）
-2. **改调用点不碰 `requestHeaders` 函数体。** masquerade 的 UA 补丁锚点是
-   `requestHeaders` 那 9 行的**整个函数体**（`:1732-1740`）。我们改的是**调用点**
-   `:1883`（实测全文**唯一命中**，5 个前导 Tab，45 字节）。两者**零重叠** ⇒ 可共存。
-3. **改 pi-ai 会与 masquerade 的 body 补丁撞锚点。** masquerade body 补丁的第一锚点
-   就是 `createClient` 里 `Object.assign(headers, optionsHeaders)` 那一段
-   （`openai-responses.js:197-200`）。我们把注入点放在 `dsh-llm-pi-ai` 的上游，
-   就绕开了这次碰撞。**（分叉 e 已裁定 body 不做，本条仅存档，作为当时不做 G2 的历史理由。）**
+**为什么不能只靠 profile 配置**（这条事实仍然成立，是运输层存在的前提）：
+`requestHeaders()`（`lib/index.js:1732-1740`）先把与 `attributionHeaders()` 键名
+（大小写不敏感）冲突的项**过滤掉**，再把归属头 `...attribution` 铺在后面 —— 归属头
+**赢**。故往 profile 的 provider 段里写 `user-agent` 是**无效**的（被静默丢弃）；
+`originator` / `x-codex-window-id` 不在归属头键名集合里，本来就能透传。
+（真机验证通过的是「UA + originator + `x-codex-window-id` + body」四者齐备的形态；
+本设计只做**头三项**，body 不做 —— 如实记录，见 §13 分叉 e。）
 
-**代价**：`dsh-llm-pi-ai` 是 checkout 产物（见 §9.1），补丁会落到源码仓的 `lib/` 里；
-一次 `tsc` 重建即抹掉 —— 这既是缺点（需要自动维持），也是优点（还原极其干净）。
+> **历史存档（旧补丁引擎的落点取舍，已随 §0.1 退役）**：旧方案选的落点是
+> `dsh-llm-pi-ai/lib/index.js` 的调用点 `:1883`（包一层）+ 文件末尾追加注入函数；
+> 不选 `pi-ai/openai-responses.js`，是为了避开 masquerade body 补丁在
+> `createClient` 的 `Object.assign(headers, optionsHeaders)`（`:197-200`）上的锚点。
+> 它当时自认的「代价」是：补丁落到源码 checkout 的 `lib/` 里、`tsc` 一次重建即抹掉、
+> 故需要自动维持循环 —— 这套取舍连同它的代价已整体作废，**现在一个宿主文件都不写**。
 
 ---
 
-## 3. 补丁设计
+## 3. 运输层设计
 
-### 3.1 目标文件与解析
-
-| 项 | 值 |
-|---|---|
-| 包名 | `@deepseek-ai/dsh-llm-pi-ai` |
-| 版本基线 | `0.1.7-rc.1` |
-| `package.json` 关键字段 | `"type": "module"`、`"main": "lib/index.js"` |
-| `exports` | `"."` / `"./src/*"` / **`"./package.json"`（有）** |
-| 目标文件 | `<包目录>/lib/index.js` |
-| 解析方式 | `require.resolve('@deepseek-ai/dsh-llm-pi-ai/package.json')` → `dirname` → `join('lib/index.js')` |
-
-**pi-ai 侧**（v1 不改，但 §9 的「共存检查」需要知道它在哪）：
+### 3.1 落点：`globalThis.fetch`，**不写任何宿主文件**
 
 | 项 | 值 |
 |---|---|
-| 包名 | `@earendil-works/pi-ai` |
-| 版本基线 | `0.85.1` |
-| `exports` | `.` / `./compat` / `./providers/*` / `./api/*` / `./utils/*` / `./oauth` / `./bedrock-provider` / `./bun-oauth` —— **没有 `./package.json`** |
-| 后果 | `require.resolve('@earendil-works/pi-ai/package.json')` 抛 `ERR_PACKAGE_PATH_NOT_EXPORTED` |
-| 解析方式 | **不能**用 `require.resolve`。改为从 `dsh-llm-pi-ai` 的目录出发按目录拼接，两条路径依次尝试：① `<profile>/node_modules/@earendil-works/pi-ai/dist/api/openai-responses.js`；② `<dsh-llm-pi-ai 目录>/node_modules/@earendil-works/pi-ai/dist/api/openai-responses.js` |
-| 不存在时 | **不是错误**：说明该 profile 没装 pi-ai，伪装功能整体静默不可用（v1 不写 pi-ai，故仅影响共存检查） |
+| 模块 | `src/account-hub-masquerade-transport.ts` |
+| 落点 | `globalThis.fetch` 包装器 + `AsyncLocalStorage` |
+| 目标文件 | **无**。全模块零文件 IO：不解析包路径、不读写 `node_modules`、不碰 `app.asar` |
+| 安装时机 | 接线方在**载荷非 `undefined`** 时调 `ensureMasqueradeFetch()`（幂等，重复调用不叠层） |
+| 模块加载副作用 | **零**：被 import 时不碰 `globalThis.fetch`、不注册任何钩子，安装只发生在显式调用时 |
 
-### 3.2 为什么必须打补丁（`requestHeaders` 的归属头碰撞）
+> ⚠️ **旧「§3.1 目标文件与解析」已随 §0.1 退役删除**（含 pi-ai 侧的目录拼接路径）。
+> 它记录的那两条候选路径（`require.resolve('@deepseek-ai/dsh-llm-pi-ai/package.json')`
+> → `join('lib/index.js')`，以及 `<profile>/node_modules/@earendil-works/pi-ai/dist/api/…`
+> 优先的两条拼接）**正是退役根因里那两条「永远打不中真文件」的路径**：宿主按
+> installation-first 解析契约从封印的 `app.asar` 内加载 rc.2 副本，两者路径集合永不相交。
+> 留着这套解析规则只会让后来者重新走上那条死路，故整节删除、不留存档。
+
+### 3.2 为什么必须存在这条通道（`requestHeaders` 的归属头碰撞）
 
 `lib/index.js:1732-1740` 的原文语义（逐行）：
 
@@ -171,143 +220,117 @@
 | 1736-1739 | `{ ...过滤掉 reserved 的 profile.headers, ...attribution }` | **归属头赢** |
 
 结论：`user-agent` 是**保留键名**，profile 里写什么都发不出去。这是本设计必须存在
-补丁的**唯一**原因（其余三个头都不需要补丁）。
+一条**绕过 profile 的通道**的**唯一**原因（其余两个头本就能透传，但也一并走同一条通道，
+避免两套机制并存）。旧方案用「打补丁改宿主文件」绕，已随 §0.1 退役；现行方案用
+`globalThis.fetch` 包装器在**出网前**改写，见 §3.3。
 
-### 3.3 补丁形态（两段，同一文件）
+### 3.3 载荷的语义规格（`MasqueradePayload`）
 
-**规格而非实现**，仅表达形态：
+载荷是**三个各自独立的可缺席字段**（部分伪装是合法形态：只配了 `userAgent` 的条目
+就只换 UA，另外两个头一个字节都不动）：
 
-```
-段 1（调用点改写）—— 锚点 = 唯一命中的那一行
-  原：  <5×TAB>headers: requestHeaders(profile.headers)
-  新：  <5×TAB>headers: <注入函数名>(requestHeaders(profile.headers), options)
-
-段 2（函数定义注入）—— 追加到文件末尾
-  <marker 起> <fence>
-  function <注入函数名>(headers, options) { …见 §3.4… }
-  <fence> <marker 止>
-```
-
-| 设计点 | 取值 | 理由 |
+| 字段 | 出站动作 | 缺省行为 |
 |---|---|---|
-| 段 1 锚点 | 精确字面量 `\t\t\t\t\theaders: requestHeaders(profile.headers)` | 实测全文唯一（1 hit），无需正则、无需上下文行 |
-| 段 2 落点 | **文件末尾追加** | ① 模块顶层是语句边界，函数声明**提升**，调用点在前也合法；② 追加**不需要锚点匹配**，少一处可能漂移的匹配点；③ 还原 = 从末尾裁掉围栏块，判定简单 |
-| 幂等判据 | 文件内是否含 marker 字符串 | 命中即 `alreadyPatched`，不重复写 |
-| 围栏 | 起止各一行 marker + 一对 fence 行 | 还原时按 fence 配对裁剪；**不配对 ⇒ 抛错、不写**（见 §3.5） |
-| 注入函数是否 import | **零 import**、零外部依赖 | 该文件是 rollup 产物，插入新 import 会破坏打包假设；函数体只用参数与标准库 |
-| 变量来源 | `options` 在调用点**已在作用域内** | `:1879-1882` 已经在用 `options.temperature` / `options.maxTokens` / `options.sessionId`，`options` 是 `streamWithSnapshot` 的形参 |
-
-**段 1 为什么是「包一层」而不是「在后面加一行赋值」**：`headers:` 是对象字面量的一个
-属性，后面没有语句边界可以插赋值。包一层是**单行、单表达式**的最小改写，且
-`requestHeaders(...)` 的原调用原样保留 ⇒ 基线头仍是**原函数**算出来的，
-与 masquerade 的 UA 补丁**天然叠加**（它的返回值喂给我们的函数）。
-
-### 3.4 注入函数的语义规格
-
-输入：`headers`（`requestHeaders()` 的返回值，普通对象）+ `options`（`GenerateOptions`）。
-
-| 载体字段（结构性读取） | 动作 | 缺省行为 |
-|---|---|---|
-| `options.accountHubUserAgent` | 删掉所有 `user-agent` 异形键后写 `headers['User-Agent'] = 值` | 不动（保留归属头，或 masquerade 覆盖后的值） |
-| `options.accountHubOriginator` | 删掉所有 `originator` 异形键后写 `headers['Originator'] = 值` | 不动（该头本就不存在） |
-| `options.accountHubMasquerade`（★新） | 按枚举字段写 `x-codex-window-id` | 不动 |
-| 三者**全部**缺席 | **原对象原样返回**（同一引用） | 出站逐字节一致 |
+| `userAgent` | `User-Agent` **整体换成**它（不是追加、不是前缀） | 不动（保留归属头） |
+| `originator` | **新增**一个 `Originator` 头并取该值 | 不动（该头本就不存在） |
+| `windowId` | **新增**一个 `x-codex-window-id` 头并取该值 | 不动 |
 
 | 纪律 | 说明 |
 |---|---|
-| 校验复用既有判据 | `accountHubUserAgent` / `accountHubOriginator` 的合法性判据**只在** `src/account-hub-user-agent.ts` / `src/account-hub-originator.ts` 各一份。注入函数是宿主侧的**裸函数**、无法 import 插件模块，故它只做**最小防御**（非空字符串即用），合法性由**写路径**（`assertValidAutoRouteConfig`）负责 —— 与七个适配器 `send()` 的既有分工一致 |
-| 不做「任意头」 | `accountHubMasquerade` 是**命名枚举**对象（`{ windowId }`，body 开关字段已随分叉 e 裁撤），不是 `Record<string,string>`。理由见 §1.3 |
-| 异形键清理 | 必须（`User-Agent` vs `user-agent` 会变成两个头、上游看到拼接值），与 `applyAccountHubUserAgent` 既有做法逐字对齐 |
-| 不吞异常 | 注入函数不 try/catch。它是纯字符串拼接，抛错即代码缺陷，应暴露 |
+| 值**在此处不再校验** | 三个字段的判据分别归 `src/account-hub-user-agent.ts` / `account-hub-originator.ts` / `account-hub-window-id.ts`（写路径与读路径共用的唯一判据）。运输层只调用它们的 `normalize*`，**不复制一份校验** —— 三处判据一旦分叉，就会出现「配置面接受、出站面拒绝」这类只在特定输入下现形的缺口 |
+| 不做「任意头」 | 载荷是**命名枚举**对象，不是 `Record<string,string>`。理由见 §1.3 |
+| 三者归一后全空 ⇒ `undefined` | 这是**默认路径逐字节不变**的判据所在：调用方既不装包装器、也不套 ALS 代理（见 §3.6、§3.8） |
+| 判据是「归一后至少一个字段」 | 而**不是**「`entry.masquerade` 在不在」—— UA / Originator 单配（没配 `windowId`）同样是要伪装的请求 |
 
-### 3.5 失败处置（每一条都是「不写」而非「猜」）
+### 3.4 三种头容器形态与写入纪律
 
-| 情形 | 处置 | 用户可见 |
-|---|---|---|
-| 目标包不存在（profile 没装 pi-ai 适配器） | 功能**静默不可用**，不报错 | 面板预设下拉置灰 + 提示「当前环境未安装外部 provider 适配器」 |
-| 段 1 锚点**零命中** | **抛错、不写** | 面板红色徽标「目标文件版本不匹配（未打补丁）」；日志 warn 带版本号 |
-| 段 1 锚点**多次命中** | **抛错、不写**（与零命中同处置） | 同上。多命中说明该行不是唯一调用点，包一层会漏改另一处 |
-| marker 在但 fence **不配对** | **抛错、不写**（半截补丁是坏文件） | 同上 + 提示「请先还原再重打」 |
-| 文件只读 / 写入 EPERM | **抛错、不写**，保留原文件 | 面板提示权限问题 |
-| 写临时文件失败 | 清理临时文件（容忍 ENOENT），**原文件未动** | 同上 |
-| 已打过补丁（marker 命中且 fence 配对） | 幂等跳过，**不重写** | 面板绿色徽标「已生效（v<版本>）」 |
+`RequestInit.headers` 的全部三种载体形态各按自己的规矩写，**同一个头名在一次请求里
+只能出现一次**（否则上游看到的是拼接值，是最难查的一类缺陷）：
 
-**锚点纪律**（沿用 masquerade 的成熟做法）：精确字面量匹配；不匹配 ⇒ `throw`；
-**永远不做 trim / 正则 / 模糊匹配**。理由：模糊匹配在版本漂移时会「匹配到一个看起来
-差不多的位置」并写入 —— 那是最坏结果（文件被改坏且没人知道）。
+| 形态 | 写法 |
+|---|---|
+| `Headers` | `set()`，键大小写不敏感，天然覆盖 |
+| `string[][]` | 同名的对**就地对调**（保序，不把 `User-Agent` 挪到头的末尾去），多余的重复对删掉，没有则 push 一对新的 |
+| 普通对象 | 先删掉同名异形键（`user-agent` 之类），再按规范键名赋值 |
 
-### 3.6 原子写入
+| 纪律 | 说明 |
+|---|---|
+| 只写**既有的**容器 | 不重建容器、不重建任何对象。`init` 上可能挂着 `duplex`（流式请求体必需）、`signal`、`body` 流等一堆不能复制的字段，故**绝不重建 `init`**；没有载体时才挂一个空对象 |
+| `init` 缺席 ⇒ 原样转发 | **不代造 `init`**。openai SDK 的真实调用形状恒为 `(url, init)`；`fetch(request)` 那种 Request 对象形态放弃伪装照常发送（造一个假的 init 去补头，等于替调用方改变请求语义，比不伪装危险得多） |
+| 单头写失败只退化成「少一个头」 | 见 §3.5 |
+| 值非法 ⇒ 当「没有」 | `normalize*` 已保证「脏值一律当没有、绝不抛错」（配置面到出站面隔着 RPC 反序列化，那里抛错等于把一次配置笔误升级成请求失败） |
 
-沿用 `shabhui/dsh-client-masquerade` 的 `writeDetached` 语义（该做法已被其测试套件
-钉死，见 §10.4）：
+### 3.5 失败处置：只允许「少一个头」，**绝不允许请求失败**
 
-| 步骤 | 动作 | 为什么 |
-|---|---|---|
-| 1 | 在**同目录**建临时文件 `target + '.dshcm-' + randomUUID() + '.tmp'` | 同目录才能保证 `rename` 是**同卷原子操作** |
-| 2 | 打开标志 `'wx'`（独占创建） | 防止撞上残留临时文件而静默覆写 |
-| 3 | 权限位**继承原文件** | 保持可执行位/只读位一致 |
-| 4 | `renameSync(tmp, target)` | 原子替换；**顺带与 pnpm store 硬链接分离**（见 §3.7） |
-| 5 | `finally` 删临时文件，**容忍 ENOENT** | 成功路径下临时文件已被 rename 走，删它会 ENOENT —— 那是正常路径，不是错误 |
+| 情形 | 处置 |
+|---|---|
+| 单个头的值非法（含 CR / LF 让 `Headers.set` 抛 `TypeError`）、容器只读 guard | **就地吞掉该头的异常**，既不外抛、也不连累后面两个头 |
+| 一个头都没写成功 | 与「没有载荷」等效：请求照常发出，只是没伪装（返回 `false`） |
+| 载荷为 `undefined` | **一次都不碰参数**，直接原样转发（见 §3.7） |
+| 容器 `undefined` | 由调用方负责造载体；写入函数不代劳，直接返回 `false` |
+| `init` 缺席 | **不代造 `init`**（见 §3.4） |
 
-**为什么必须是「临时文件 + rename」而不是 `writeFileSync(target)`**：直接写会把
-**半截内容**暴露给正在运行的 DSH 进程（`import` 缓存已加载则无妨，但下一次冷启动
-可能读到写了一半的文件）；且如果目标是硬链接，直接写会**污染 pnpm store 里的原件**
-（影响所有共享该 store 的项目）。
+⚠️ **这条纪律的方向是刻意的**：伪装是**锦上添花**，绝不能把一次配置笔误升级成
+**请求失败** —— 后者会直接毁掉一次对话，而前者的代价只是「这次没伪装上」。
+这与旧补丁引擎的「锚点不匹配 ⇒ 抛错、不写」是**相反**的取舍方向，原因是失败的性质
+不同：旧方案写坏的是**宿主文件**（不可逆、影响所有请求），新方案最坏只是**这一次**
+少写一个头（下一次请求照常尝试）。
 
-### 3.7 硬链接 / Junction 实测事实（本机）
+> **旧「§3.5 失败处置 / §3.6 原子写入 / §3.7 硬链接实测 / §3.8 自动维持循环」已随
+> §0.1 整体退役删除**。它们记录的是「临时文件 + rename 原子替换」「pnpm store 硬链接
+> 分离」「marker / fence 配对校验」「零命中/多命中一律抛错不写」，以及那个 **5 分钟
+> 低频自检定时器** —— 这一整套机制存在的前提是「补丁会被 `tsc` 重建抹掉」，而新版
+> **一个宿主文件都不写**，故前提消失、机制整体不需要：没有「打没打上」这种可失败状态，
+> 也没有需要自愈的东西。详见 §0.1.2 / §0.1.3。
 
-| 路径 | 类型 | 指向 |
-|---|---|---|
-| `~/.dsh/profiles/node_modules/@deepseek-ai/dsh-llm-pi-ai` | **Junction** | `…\apps\cli\node_modules\@deepseek-ai\dsh-base\node_modules\@deepseek-ai\dsh-llm-pi-ai` |
-| 上者（`apps/cli/...`） | **SymbolicLink** | `..\..\..\..\llm\llm-pi-ai`（= `packages/llm/llm-pi-ai`） |
-| `packages/llm/llm-pi-ai` | 普通目录（非 reparse point） | — |
-| `~/.dsh/profiles/node_modules/@earendil-works/pi-ai` | **Junction** | `…\dsh-llm-pi-ai\node_modules\@earendil-works\pi-ai` |
-| 上者 | **SymbolicLink** | `…\node_modules\.pnpm\@earendil-works+pi-ai@0.85._a68c…\node_modules\@earendil-works\pi-ai` |
+### 3.6 安装、卸载与共存
 
-| 实测项 | 结果 | 含义 |
-|---|---|---|
-| `lib/index.js` 的 `nlink` | **1** | 不是硬链接副本 |
-| `fsutil hardlink list`（profile 路径） | 只列出 `…\packages\llm\llm-pi-ai\lib\index.js` | profile 侧与 checkout 侧是**同一个文件**（经 Junction/Symlink 到达） |
-| `openai-responses.js` 的 `nlink` | **1** | 同上 |
-| `fsutil hardlink list`（pi-ai 路径） | 只列出 `.pnpm\@earendil-works+pi-ai@0.85._a68c…\…\openai-responses.js` | 同上 |
+| 项 | 行为 |
+|---|---|
+| 安装 | `ensureMasqueradeFetch()`，**幂等**：重复调用不叠层（先查标记） |
+| `base` 捕获 | 在**安装时刻**捕获当时的 `globalThis.fetch`，包装器只转发给它 ⇒ 能与其它同样包装 `globalThis.fetch` 的插件**共存**（后装的套在外层，逐层透传） |
+| 卸载 | `releaseMasqueradeFetch()`：**只还原自己那一层**。若当前 `globalThis.fetch` 已不是本模块装的包装器（被别的插件又套了一层、或被测试替换过），**什么都不做** —— 硬还原会踩掉别人的包装 |
+| 身份标记 | 挂在包装函数自己身上的 `Symbol.for('dsh-account-hub.masquerade-transport.fetch')`。用 `Symbol.for` 而非 `Symbol()`：同一个模块被两条路径加载出两份实例时（打包器去重失败、ESM/CJS 双份），`Symbol()` 的两份标记互不相等，会各装一层 |
+| 与宿主代理插件的关系 | 宿主代理那条走 undici dispatcher 的路子，是**更底层**的一层，与本包装器不冲突 |
 
-**由此得出三条设计结论**：
+### 3.7 默认路径**零变化**（本设计的核心红线）
 
-1. 本机形态下，补丁**会落到源码 checkout 的 `packages/llm/llm-pi-ai/lib/index.js`**。
-   这必须在文档与面板里**明确告知**（见 §10 风险 R1）。
-2. 但设计**不能依赖**这个形态：别的机器上 pnpm 可能用硬链接把 store 里的文件链到
-   profile。`临时文件 + rename` 在两种形态下都正确（硬链接形态下它**分离**副本，
-   不动 store）。这就是 §3.6 选它的第二个理由。
-3. 还原同样是「写回原文 + rename」⇒ 本机形态下 checkout 侧文件一并还原。
-   **`tsc` 一次重建**也会还原（这正是「自动维持循环」要处理的场景，见 §3.8）。
+| 层 | 零变化的表现 |
+|---|---|
+| 模块加载 | 被 `import` 时**不安装任何东西**（不碰 `globalThis.fetch`、不注册钩子）。安装只发生在显式调用 `ensureMasqueradeFetch()` 时 —— 由接线方决定时机，也让单测能干净地进出这个状态 |
+| 安装时机 | 接线方**仅在载荷非 `undefined` 时**才调 `ensureMasqueradeFetch()` ⇒ 默认路径下 `globalThis.fetch` 与加本功能之前是**同一个对象**（哪怕包装器在零载荷时只是纯转发，装它也会改变**所有**出站请求的调用栈形态，而 `globalThis.fetch` 是全进程共享的、别的插件也看得见） |
+| 无载荷时的包装器 | `base(input, init)` 原样转发，**连 `init` 的字段都不读** |
+| ALS 代理 | 载荷为 `undefined` 时**不套**：`consumed` 就是内层流本身 |
 
-### 3.8 自动维持循环
+出站请求与加本模块之前**逐字节一致** —— 这是 `AGENTS.md`「出站协议值不随 provider id /
+显示名变化」红线的延伸。
 
-**要解决的场景**（按发生概率排序）：
+### 3.8 核心纪律：ALS 包**消费侧**，不包创建侧
 
-| # | 场景 | 症状 |
-|---|---|---|
-| S1 | 在 checkout 里跑了一次 `pnpm build` / `tsc` | 补丁消失，出站头退回归属 UA，4router **403**，而面板上开关还开着 |
-| S2 | DSH 升级 / 重装插件，`dsh-llm-pi-ai` 被新版本覆盖 | 同上；且新版本锚点可能已漂移 |
-| S3 | 用户在别的工具里改了该文件 | 同上 |
-| S4 | 用户手工还原后又想开 | 需要重打 |
+**这条是本设计最容易改错的地方，且改错时不会报任何错。**
 
-**检查点**（全部是「幂等 + 失败即报」）：
+async generator 的**函数体**不在创建它的地方执行，而在**每一次恢复它的
+`.next()` / `.return()` / `.throw()` 调用的上下文**里执行。故只包住「创建」、
+然后让外层 `yield*` 去消费，载荷在整段运行期都是**看不见**的 —— 创建时的上下文
+根本不会被函数体继承。
 
-| 触发 | 时机 | 为什么 |
-|---|---|---|
-| ① 插件启动 | `apply()` 里、`pool.openStorage()` **之后**（与 `ensureAutoRouteRegistration` 同一时机） | 存储未就绪时读到的开关状态可能是错的（既有教训，见 `docs/agents/auto-route-runtime.md` §5） |
-| ② 面板打开 | 新增 RPC `masquerade.status` 被调用时**顺带**做一次 | 用户唯一会看到状态的地方；面板打开时补一次，代价是一次文件读 |
-| ③ 保存配置 | `autoroute.set` 成功后，若该配置里**存在**开启伪装的条目 | 用户刚打开开关，必须立刻生效 |
-| ④ 低频定时 | **5 分钟一次**（见 §13 分叉 j） | 覆盖 S1/S3 这类「用户不在面板上」的静默失效 |
+| 落点 | 正确性 |
+|---|---|
+| `withMasqueradeAsyncIterable(payload, stream)` 套在 `for await` 这一侧 | ✅ 每一次 `.next()` 都进上下文，内层适配器**真正发请求那一刻**看得见载荷 |
+| 加在 `ctx.llm.stream(forwarded)` 的创建点 | ❌ 等于什么都没包，且**不报错**，只是「伪装整段静默失效」 |
 
-**「维持」不等于「盲目重写」**：每次维持都**重新走完整套判据**（marker → fence 配对 →
-锚点唯一命中 → 写入）。任一判据不过 ⇒ **报错、不写**。绝不因为「上次打过」就跳过校验。
+**代理必须把 `next` / `return` / `throw` 三个方法全部包住**（每次都
+`masqueradeStorage.run(payload, ...)`）：
 
-**与「还原」的关系**（§13 分叉 f，F4 已定案）：**没有任何条目配置伪装头 ⇒ 补丁不打；
-打了的自动还原**。故维持循环与还原**不冲突** —— 二者是同一个判据的两面：维持循环每次
-先算「有无任何条目配伪装头」，有则按完整判据链打/校验，无则执行 §9.3 的还原四步。
-不存在「用户点了还原、定时器又打回去」的矛盾，因为**根本没有手动还原入口**（UI 上无按钮）。
+- `next()` → 载荷在「生成器函数体运行 + 它发出的请求」期间可见；
+- `return()` → 载荷在「`break` / 提前退出触发的 `finally` 收尾」期间可见；
+- `throw()` → 载荷在「异常处理分支」期间可见。
+
+⚠️ **不能只包 `next()`**：真实适配器的流在提前退出时会走 `return()`，那条路径上的
+清理逻辑一样可能发请求（销账、上报），掉了载荷就会**用错身份**。少包一个，语义就不闭合。
+
+源迭代器**没实现** `return` / `throw` 时，按迭代协议自己收尾（`return` 回
+`{ done: true }`、`throw` 把异常抛回调用方），不能把调用方的退出动作吞掉。
 
 ### 3.9 与 `forwardOptions()` 的接线
 
@@ -431,7 +454,7 @@ AutoRouteEntry {
 |---|---|
 | storage（`dsh_account_hub`） | 正常读写 |
 | 旧 settings 回退（`jet-hub`） | 同款：`autoRoute` 整块经 `sanitizeAutoRouteConfig`，`masquerade` 脏值**只丢字段、不丢条目** |
-| 内存 | 同上；功能可用但**补丁维持循环仍在**（它不依赖存储） |
+| 内存 | 同上；伪装照常工作 —— 运输层活在进程内存里，**不依赖存储**（旧文此处写「补丁维持循环仍在」，那套循环已随 §0.1 退役） |
 
 ---
 
@@ -465,8 +488,8 @@ AutoRouteEntry {
 | 控件 | `AutoRouteSelect`（既有下拉，与前三行同款） | 复用既有组件，不引入新控件 |
 | 选项 | `关闭` / `Codex 客户端`（+ 预留项） | 选项 id 是预设 id（`''` 哨兵 = 关闭，与 `AUTO_ROUTE_DEFAULT_EFFORT = ''` 同款） |
 | 联动 | 选 `codex` ⇒ 把官方真值**填入**上面 UA / Originator 两行；两行**保持可编辑、不锁只读**。用户手改任一值 ⇒ 下拉**自动切到「自定义」** | 见 §13 分叉 b |
-| 状态徽标 | 行内一个徽标：`已生效` / `未打补丁` / `版本不匹配` / `环境不支持` | 数据来自新 RPC `masquerade.status`（见 §5.3） |
-| 还原入口 | **无**。不提供任何手动还原入口（UI 上没有任何按钮） | 见 §13 分叉 f：清空全部条目伪装头即自动还原 |
+| 状态徽标 | 行内**一个**徽标：`出站伪装已就绪`（`AUTO_ROUTE_MASQUERADE_READY`，tone = success） | 数据来自 RPC `masquerade.status`（见 §5.3）。**收到该 RPC 的响应本身就证明运输层在场** —— 故只有「就绪」这一态，没有「未打补丁 / 版本不匹配 / 环境不支持」这三态 |
+| 还原入口 | **无**，且**不再需要** | 旧方案要还原宿主文件，才有「怎么撤销」的问题；运输层不写任何文件，清空条目伪装头即彻底关闭（见 §13 分叉 f） |
 
 **预设是「一键填入官方真值」的宏**（§13 分叉 b）：预设名**不持久化**，出站身份只看
 `entry.userAgent` / `entry.originator` 两格的实际值，不看预设名。`windowId` 随伪装头
@@ -476,9 +499,13 @@ AutoRouteEntry {
 
 | RPC | 入参 | 出参 | 纪律 |
 |---|---|---|---|
-| `masquerade.status` | 无 | `{ available: boolean, applied: boolean, reason?: string, targetVersion?: string }` | **尽力而为、永不抛错**（与 `autoroute.model-info` 同款：查不到就回 `{available:false, reason:'…'}`，报错会让面板显示成「加载失败」而误导） |
-| `masquerade.apply` | 无 | 同上 | 幂等；失败**要**报错。**内部**调用，不对应任何 UI 按钮（维持循环按「有无条目配伪装头」自动调用） |
-| ~~`masquerade.revert`~~ | — | — | **不提供**（§13 分叉 f：无手动还原入口）。还原由维持循环在「无任何条目配伪装头」时**自动**执行 |
+| `masquerade.status` | 无 | `{ available: true, transport: 'als-fetch' }`（冻结常量） | **永不抛错**。出参**只剩两项** —— 旧方案那套 `applied` / `reason` / `targetVersion`（回答「打没打上补丁」）随 §0.1 整体消失：运输层活在进程内存里，**没有可失败的在盘状态**，故没有可报的「未生效原因」 |
+| `masquerade.apply` | 无 | 同上（**同一个冻结常量对象**） | **刻意保留的无副作用空操作**。它今天不做事，但**不删** —— 外部脚本/自动化可能仍在调用，删掉会让调用方把「不需要做任何事」误读成「功能坏了」（§0.1.4） |
+| ~~`masquerade.revert`~~ | — | — | **不提供**（§13 分叉 f：无手动还原入口）。运输层不写任何文件，**没有可还原的对象** |
+
+> ⚠️ **`applied` 字段的消失是刻意的，不要为「兼容」把它补回来**：一个恒为 `true` 的
+> `applied` 会让读者重新以为存在「已应用 / 未应用」两态，而那正是被 §0.1 淘汰的模型。
+> 查询「运输层在不在」的唯一方式是 `available` + `transport`（见 §5.2 徽标）。
 
 ⚠️ **客户端有渲染级单测，`build:client` 冒烟是另一道防线**（订正：原稿称「唯一防线」，
 与事实不符 —— 既有 **15 个** spec 真渲染 `plugin-src/client/`，见 §10.1）。`plugin-src/`
@@ -489,13 +516,15 @@ AutoRouteEntry {
 
 ### 5.4 常量（与既有风格对齐）
 
-| 常量 | 草案值 | 对齐对象 |
+| 常量 | 值 | 对齐对象 |
 |---|---|---|
-| `AUTO_ROUTE_MASQUERADE_PLACEHOLDER` | `默认关闭（不伪装）` | `AUTO_ROUTE_ORIGINATOR_PLACEHOLDER`（固定一句、不现算） |
-| `AUTO_ROUTE_MASQUERADE_APPLIED` | `已生效` | — |
-| `AUTO_ROUTE_MASQUERADE_NOT_PATCHED` | `未打补丁` | — |
-| `AUTO_ROUTE_MASQUERADE_VERSION_MISMATCH` | `目标文件版本不匹配` | — |
-| `AUTO_ROUTE_MASQUERADE_UNAVAILABLE` | `当前环境未安装外部 provider 适配器` | `AUTO_ROUTE_UA_UNKNOWN_PLACEHOLDER`（宁可明说「不知道」，不给与真相相反的结论） |
+| `AUTO_ROUTE_MASQUERADE_OFF` / `_CODEX` / `_CUSTOM` | `''` / `'codex'` / `'custom'` | 预设 id；`''` 哨兵 = 关闭，与 `AUTO_ROUTE_DEFAULT_EFFORT = ''` 同款 |
+| `AUTO_ROUTE_MASQUERADE_READY` | `出站伪装已就绪` | tone = `success`。**只剩这一个**状态常量 |
+
+> ⚠️ **旧表里的四个状态常量（`_APPLIED`「已生效」/ `_NOT_PATCHED`「未打补丁」/
+> `_VERSION_MISMATCH`「目标文件版本不匹配」/ `_UNAVAILABLE`「当前环境未安装外部 provider
+> 适配器」）全部删除**，它们描述的四种在盘状态已随 §0.1 消失。删掉而不是保留成「永不出现的
+> 死常量」，是因为留着会让人以为还存在「打没打上」这条判据（§5.3 同款理由）。
 
 ### 5.5 CSS
 
@@ -520,78 +549,65 @@ AutoRouteEntry {
 |---|---|---|
 | Z1 | 七个 provider 适配器（`src/llm-adapter.ts` / `buddy-*` / `lobsterai-*` / `trae-cn-*` / `qoder-*`）**一行不改** | `git diff` 只出现在 `auto-route.ts` / `auto-route-adapter.ts` / 新增文件 / 客户端三文件 |
 | Z2 | `masquerade` 缺席时，`forwardOptions()` **不挂任何新键** | 与今天逐字节一致 |
-| Z3 | 注入函数在三字段全缺席时**原对象原样返回** | 出站头逐字节一致 |
+| Z3 | `masqueradePayloadOf(entry)` 在三字段归一后全空时返回 **`undefined`** | 此时既不装 `fetch` 包装器、也不套 ALS 代理，出站逐字节一致 |
 | Z4 | `accountHubUserAgent` / `accountHubOriginator` 的既有语义**不变** | `tests/unit/account-hub-header-overrides.spec.ts`（16 例）**全绿**，一例不改 |
-| Z5 | 自动路由的转发语义（档位 / 消息重写 / 降级 / 重试策略）**不变** | `tests/unit/auto-route-adapter.spec.ts`（76 例）**全绿** |
+| Z5 | 自动路由的转发语义（档位 / 消息重写 / 降级 / 重试策略）**不变** | `tests/unit/auto-route-adapter.spec.ts`（81 例）**全绿** |
 | Z6 | 九个存储字段与 `ACCOUNT_HUB_SCHEMA_VERSION` **不变** | `docs/agents/account-hub-storage.md` 无需改 |
-| Z7 | 未开启自动路由、或候选未配伪装时，**补丁存在与否都不影响出站** | 补丁只包了一层调用，三字段缺席即原样返回 |
+| Z7 | 未开启自动路由、或候选未配伪装时，**运输层在不在场都不影响出站** | 载荷为 `undefined` ⇒ 包装器纯转发（`base(input, init)` 原样），ALS 一个字节都不进 |
 
 ### 6.2 唯一「有影响」的地方（必须显式承认）
 
 | 影响 | 说明 |
 |---|---|
-| 补丁改的是**宿主适配器产物文件** | 这是本设计**唯一**越出插件边界的动作。它不影响七家的行为（`router-4` 等外部 provider 走的是 `dsh-llm-pi-ai`，与本插件七家适配器是**不同**的 provider），但确实改了磁盘上不属于本插件的文件 |
-| 该文件是 checkout 产物 | 见 §9.1 与风险 R1 |
+| 包装的是**进程级**的 `globalThis.fetch` | 这是本设计**唯一**越出「只改自己数据」边界的动作：装上去以后，**所有**走 `fetch` 的出站请求都要经过这层包装器（包括别的插件的）。它不改任何文件，也不改七家的行为，但确实动了全进程共享的入口 |
+| 故有「按需安装」纪律 | 只在**载荷非 `undefined`** 时才装（见 §3.7）：默认路径下 `globalThis.fetch` 与加本功能之前是**同一个对象**，包装器压根不存在。零载荷时包装器只是纯转发，装它仍然会改变所有出站请求的调用栈形态 |
+| 包装器对非伪装请求**只转发** | 载荷缺席 ⇒ `base(input, init)` 原样转发，**连 `init` 的字段都不读**（§3.7） |
 
 **为什么这不违反「红线」**：AGENTS.md 的红线是「**出站协议值**不随 provider id /
 显示名变化」—— 它管的是「改名不能改出站身份」。本设计改的是**用户显式开启的、
 逐候选的伪装**，且**默认关闭时零变化**；改名的路径完全不经过这里。两者不冲突。
 
+**与旧方案的关键差别**：旧补丁引擎改的是**磁盘上不属于本插件的文件**（宿主适配器产物），
+失败是**不可逆的**（写坏文件影响所有请求）；新方案最坏只是**这一次请求**少写一个头
+（`globalThis.fetch` 本身没被破坏，下一次照常尝试）。风险量级完全不同，见 §3.5。
+
 ---
 
 ## 7. 与 `masquerade` 共存矩阵
 
-### 7.1 双方补丁的锚点对照
+### 7.1 文件层**已无交集**（旧「锚点对照」整节作废）
 
-| 工具 | 目标文件 | 锚点 | 重叠？ |
-|---|---|---|---|
-| masquerade · UA 补丁 | `dsh-llm-pi-ai/lib/index.js` | `requestHeaders()` **整个函数体**（`:1732-1740`，9 行） | **否** |
-| masquerade · body 补丁（**历史参考**） | `pi-ai/dist/api/openai-responses.js` | ① `createClient` 的 `Object.assign(headers, optionsHeaders)` 段（`:197-200`）；② `buildParams` 尾部 `Object.assign(params, options.samplingParams)` 段（`:272-275`） | **否**（本设计不碰 pi-ai，§13 分叉 e/g；body 路线已裁撤，此行仅存档） |
-| **本设计** · 调用点补丁 | `dsh-llm-pi-ai/lib/index.js` | 调用点 `:1883`（唯一命中）+ **文件末尾追加** | **否** |
+本设计**不写宿主任何文件**（§3.1），而 `shabhui/dsh-client-masquerade` 那类工具走的仍是
+「改 `dsh-llm-pi-ai/lib/index.js`」的路子。于是旧方案里需要逐条论证的东西——锚点是否
+重叠、会不会互相覆盖、自动维持会不会撞车——**在新方案下全部不成立**：
 
-**关键**：我们的注入点是「`requestHeaders(...)` 的**外面一层**」，masquerade 改的是
-「`requestHeaders` 的**里面**」。两者是**嵌套**关系，不是竞争关系。
-
-### 7.2 组合矩阵（body 裁撤后已退化）
-
-body 伪装整体不做（§13 分叉 e），故原「UA 补丁 × body 补丁 × 本设计」三维矩阵**退化
-为仅 UA 补丁一层**。剩下的组合只有四种：
-
-| # | masquerade UA 补丁 | 本设计补丁 | 候选配了伪装 | 结果 |
-|---|---|---|---|---|
-| 1 | 无 | 无 | 否 | 现状。归属 UA，无 `Originator`，无 codex 头 |
-| 2 | 无 | 有 | 否 | **与 #1 逐字节相同**（Z3 承诺） |
-| 3 | 无 | 有 | 是 | UA 换成预设值（我们的函数**赢**）、`Originator` / `x-codex-window-id` 就位；body 无指纹 ⇒ 闸门**可能仍拒**（残余风险见 §13 分叉 e，本文不展开） |
-| 4 | 有 | 有 | 是 | 我们的函数在 masquerade 的头**之上**覆写 ⇒ 预设值赢；其余 codex 头就位 |
-| 5 | 有 | 有 | 否（或条目 UA 为空） | 我们的函数原样返回 / 只补 windowId ⇒ 保留 masquerade 的 codex UA |
-
-**结论不变**：凡两方都写 `user-agent` 时，**我们的函数赢**（它在 masquerade 的返回值
-之上再覆写）。masquerade 若在场，只影响它自己那一层 UA 的基线值，与我们的头注入
-（`Originator` / `x-codex-window-id`）**正交** —— 不构成「双开才有效」的引导，
-本设计**单独安装即可工作**。
-
-### 7.3 还原/卸载的单边场景
-
-| 场景 | 结果 | 说明 |
-|---|---|---|
-| masquerade 还原（UA），本设计仍在 | **不崩**。`requestHeaders` 回原版（归属 UA）；我们的函数仍在上层跑 ⇒ 若条目配了 UA，**伪装照旧生效**；若没配，UA 退回归属头 ⇒ 闸门拒 | 这是**最需要写进文档**的一条：单边还原后「开关还开着但 UA 没了」 |
-| 本设计自动还原，masquerade 仍在 | 不崩。masquerade 的 UA 补丁**完全不受影响**（锚点不重叠）；我们注入的头（`Originator` / `x-codex-window-id`）**不再发出** | masquerade 的 revert 只替换它自己的定界区域，我们的 EOF 块与调用点改写**存活**（反向亦然） |
-| 双方同时还原 | 文件回到 stock | 顺序无关（各自只动自己的区域） |
-| 双方同时**自动维持** | ⚠️ **竞态风险**：两个工具都会「读文件 → 字符串替换 → 临时文件 + rename」。若同时发生，后写者覆盖先写者 | 见风险 R4；缓解：我们的维持循环**先检测对方 marker**，在场则只校验自己的段、不整文件重写 |
-
-### 7.4 检测对方是否在场
-
-masquerade 的 marker 形态（用于我们的共存检查，**只读不写**）：
-
-| marker | 含义 |
+| 旧方案要处理的问题 | 新方案下的状态 |
 |---|---|
-| `dsh-client-masquerade` | 其补丁的通用标记 |
-| `applyDshCodexMasquerade` | 其 UA 补丁注入的函数名 |
-| `x-dsh-body-masquerade` | body 补丁的开关头名（**body 路线已裁撤，仅存档**；本设计不发送该头） |
+| 双方锚点是否重叠 | **不存在**：我们不占任何锚点，不读也不写那个文件 |
+| 双方同时自动维持的写竞态（旧风险 R4） | **不存在**：我们没有写动作，谈不上竞态 |
+| 单边还原后另一方是否崩 | **不存在**：我们既不还原别人的补丁，也不需要别人不还原 |
+| 检测对方 marker（旧 §7.4） | **整节删除**：没有可检测的对象，也没有要避让的写入 |
 
-⚠️ **本机实测：三个 marker 当前全部不在场**（`dsh-llm-pi-ai/lib/index.js` 与
-`pi-ai/openai-responses.js` 均为 stock），且 `~/.dsh` 下**没有**安装 masquerade 插件。
-故共存矩阵是**推演**而非实测 —— 这条要写进 §12 的「实现后必须真机验证」清单。
+一句话：**共存问题随「不写文件」这个决定一起消失了**。这不是「把冲突处理得更好」，
+而是**把冲突的载体本身去掉** —— 与 §0.1 退役旧引擎是同一条思路。
+
+### 7.2 但基线 UA 仍可能被对方改写（唯一还需要说清的一条）
+
+masquerade 若在场，它改的是 `requestHeaders()` 的**里面** —— 即**基线**。我们的运输层
+在那之后、出网之前覆写，故：
+
+| masquerade UA 补丁 | 本设计运输层 | 候选配了伪装 | 出站 `user-agent` |
+|---|---|---|---|
+| 无 | 未装（默认路径） | 否 | 归属 UA（与加本功能前**逐字节一致**） |
+| 无 | 装了 | 否 | 归属 UA（包装器零载荷纯转发，**同一结果**，Z3 承诺） |
+| 无 | 装了 | 是 | 预设值（运输层覆写） |
+| 有 | 装了 | 是 | 预设值（运输层在**基线之上**覆写 ⇒ 我们的值赢） |
+| 有 | 装了 | 否 | masquerade 的 codex UA（我们一个头都不碰） |
+
+**结论**：我们的值与 masquerade 的值**不是竞争关系，是覆盖关系** —— 它决定基线，
+我们决定终值。故本设计**单独安装即可工作**，不存在「双开才有效」的引导。
+（body 伪装整体不做，见 §13 分叉 e；若 4router 闸门因缺 body 指纹仍拒，那是**本方案
+自身的**残余风险，与 masquerade 在不在场无关。）
 
 ---
 
@@ -599,49 +615,31 @@ masquerade 的 marker 形态（用于我们的共存检查，**只读不写**）
 
 ---
 
-## 9. 升级漂移与还原
+## 9. 「升级漂移」与「还原」两个概念**一并消失**
 
-### 9.1 漂移来源
+### 9.1 为什么这两节被整节删除
 
-| # | 来源 | 概率 | 补丁命运 | 自动维持能否救 |
-|---|---|---|---|---|
-| D1 | checkout 里跑 `tsc` / `pnpm build` | **高**（本机补丁就落在 checkout 里） | 被覆盖 | 能（S1） |
-| D2 | `dsh-llm-pi-ai` 升级（版本号变化） | 中 | 被覆盖，且**锚点可能漂移** | 能救「覆盖」，**救不了**「锚点漂移」⇒ 报错 |
-| D3 | 插件重装（`pnpm install`） | 中 | 同 D2 | 同上 |
-| D4 | pi-ai 升级（`0.85.1` → 新版） | 中 | 我们的补丁**不受影响**（本设计不碰 pi-ai，不依赖 body 补丁） | **不适用**（本设计不依赖 body 补丁；原「masquerade body 补丁锚点漂移」的关切已随 §13 分叉 e 裁撤，仅存档） |
-| D5 | 用户手工编辑该文件 | 低 | 可能破坏 fence 配对 | 检测到 ⇒ 报错、不写 |
+旧方案的 §9 处理的是「补丁被 `tsc` 重建 / 包升级覆盖后怎么办」「没有条目再配伪装时怎么把
+文件改回去」。这两件事的**共同前提是「我们改过宿主磁盘上的文件」** —— 新版一个宿主文件
+都不写（§3.1），故：
 
-### 9.2 版本记账
-
-补丁块内应记录**打补丁时目标的版本号**（从 `package.json` 读，实测 `0.1.7-rc.1`）。
-维持循环每次检查时：
-
-| 判据 | 处置 |
+| 旧概念 | 新方案下的状态 |
 |---|---|
-| 版本号相同 + marker 在 + 锚点唯一命中 | 已生效，跳过 |
-| 版本号相同 + marker 不在 | 重打 |
-| 版本号**不同** | 先按新版本重新校验锚点：唯一命中 ⇒ 重打并更新版本记账；否则 ⇒ 报错、不写 |
-| marker 在但版本记账缺失 | 视为「未知版本」⇒ 走「重新校验锚点」分支 |
+| 升级漂移（D1–D5：`tsc` 重建覆盖补丁、包升级导致锚点漂移、用户手改文件破坏 fence 配对） | **不存在**：没有任何补丁会被覆盖，也没有锚点会漂移 —— 我们只在内存里包装一次 `globalThis.fetch` |
+| 版本记账（记录「打补丁时目标的版本号」，实测 `0.1.7-rc.1`） | **整节删除**：没有目标版本这回事。`dsh-llm-pi-ai` 升到哪个版本都与本设计无关（它只是照常发它的请求，我们在更外层改写头） |
+| 自动维持循环（marker / fence / 锚点唯一命中四道判据） | **整节删除**：没有「打没打上」这种可失败状态，就没有需要自愈的东西（§3.5 已记录） |
+| 还原（读文件、裁 fence 块、把调用点字面量改回原样、临时文件 + rename 写回） | **整节删除**：文件从来没被改过，无需还原，也**不存在「还原后必须逐字节等于打补丁前」这条验收项** |
+| 零配置自动还原（清空全部条目伪装头 ⇒ 自动还原官方文件） | **概念不成立**：那时**一个请求都不会装包装器**（载荷全 `undefined`），出站自然地回到加入本功能之前的状态 —— 「自动」是**默认路径零变化**（§3.7）的自然结果，而不是一个需要执行的还原动作 |
+| ~~面板还原按钮~~ | 与旧方案一致：**不做**（§13 分叉 f 的结论保留，理由从「有自动还原」变成「压根没有需要还原的东西」） |
 
-### 9.3 还原（G5）
+### 9.2 与插件卸载的关系（旧条目保留，理由更新）
 
-| 步骤 | 动作 | 失败处置 |
-|---|---|---|
-| 1 | 读文件，找 fence 起止 | 不配对 ⇒ **抛错、不写** |
-| 2 | 裁掉 fence 块（含 marker 行） | — |
-| 3 | 把段 1 的调用点字面量改回 `headers: requestHeaders(profile.headers)` | 找不到注入后的字面量 ⇒ **抛错、不写**（可能被别的工具改过） |
-| 4 | 临时文件 + rename 写回 | 同 §3.5 |
+插件卸载时**什么都不需要做**：没有磁盘残留、没有需要撤回的文件改动。若包装器仍装在进程里
+（同一进程内热卸载的边界情形），它只是**纯转发**（载荷来自 ALS，而 ALS 的写入方已随插件
+卸载不再被调用 ⇒ 载荷恒为 `undefined`），出站行为与未安装时一致。
 
-**还原后必须逐字节等于打补丁前**：这条应由单测钉住（见 §10.2）。
-
-**还原触发条件**（§13 分叉 f，F4）：**没有任何条目配置伪装头 ⇒ 补丁不打；打了的自动还原**。
-这是唯一触发路径 —— **不提供任何手动还原入口**，UI 上也没有按钮。
-
-| 入口 | 形态 | 备注 |
-|---|---|---|
-| 零配置自动还原 | 维持循环检测到「无任何条目配伪装头」时**自动**执行本节的四步 | 用户想让伪装彻底消失，把所有条目的伪装清掉即可 |
-| ~~面板按钮~~ | **不做**（§13 分叉 f） | 原 F1/F2/F3 的「按钮 + 状态」方案全部裁撤 |
-| 插件卸载 | **不做**（插件卸载时可能已经没有 `ctx`，写文件不可靠） | 明确写进文档，避免用户以为卸载会自动还原 |
+> ⚠️ 这条要写进文档的**唯一**目的是消除旧文档留下的错误预期：旧方案里「卸载不会自动还原」
+> 是一个**需要向用户交代的风险**；新方案里它**不是一个风险**，因为没有留下任何东西。
 
 ---
 
@@ -653,31 +651,27 @@ masquerade 的 marker 形态（用于我们的共存检查，**只读不写**）
 
 | 层 | 落点 | 内容 |
 |---|---|---|
-| 补丁引擎单测 | 新增 `tests/unit/client-masquerade-patch.spec.ts` | 纯文件 IO，用 `os.tmpdir()` 造临时目录，**不触网、不碰真机文件** |
-| 载体通道单测 | 扩既有 `tests/unit/account-hub-header-overrides.spec.ts`（16 例） | 表驱动，覆盖新字段的结构读取与「零变化」 |
-| 转发注入单测 | 扩既有 `tests/unit/auto-route-adapter.spec.ts`（`:1472-1588` 一带） | 断言 `forwardOptions` 三字段的挂键/不挂键 |
-| 配置层单测 | 扩 `tests/unit/auto-route.spec.ts`（若有） | `entryKey` / `autoRouteConfigFacts` / 读写路径 |
+| 运输层单测 | 新增 `tests/unit/masquerade-transport.spec.ts`（**30 例**） | 纯内存：造 `Headers` / `string[][]` / 普通对象三种头容器，断言三头写入形态与幂等安装/卸载。**零文件 IO、不触网**（旧方案那套 `os.tmpdir()` 夹具已随 §0.1 退役） |
+| 运输层接线单测 | 新增 `tests/unit/masquerade-transport-wiring.spec.ts`（**15 例**） | 断言「载荷缺席 ⇒ 默认路径零变化」这条红线的每一层：不装包装器、不套 ALS 代理、`base(input, init)` 原样转发 |
+| 载体通道单测 | 既有 `tests/unit/auto-route-masquerade.spec.ts`（**23 例**） | 表驱动，覆盖 `masqueradePayloadOf(entry)` 的归一与三字段的结构读取 |
+| 转发注入单测 | 扩既有 `tests/unit/auto-route-adapter.spec.ts`（**81 例**） | 断言 `forwardOptions` 三字段的挂键/不挂键 |
 | 客户端 | 既有 **15 个** spec 真渲染 `plugin-src/client/`（含 `tests/unit/auto-route-panel.spec.ts` 41 例专测 `AutoRoutePanel`，以及 `qoder-hub-blank-screen` / `account-order-panel` / `account-consumption-panel` 等） | 下拉的选项 / 联动 / 徽标由**渲染级单测**覆盖；`build:client` 的产物顶层求值冒烟是**另一道**防线（专拦模板字符串求值类错误），**不是唯一防线** |
 | 端到端 | **人工**，不进 CI | 真机打 4router 请求，看 200 |
 
-### 10.2 补丁引擎必测项
-
-沿用 masquerade `test/patch-hardlinks.test.js`（8770 字节）的成熟技术：
+### 10.2 运输层必测项（`masquerade-transport.spec.ts`，30 例；**无文件 IO**）
 
 | # | 用例 | 技术要点 |
 |---|---|---|
-| P1 | 锚点唯一命中 ⇒ 写入成功，两段都在 | — |
-| P2 | 锚点零命中 ⇒ **抛错且文件未被修改** | 断言 `readFileSync` 前后逐字节相同 |
-| P3 | 锚点多次命中 ⇒ 抛错且不写 | 造一份把该行复制两份的夹具 |
-| P4 | 幂等：连打两次，第二次 `alreadyPatched`，文件不变 | — |
-| P5 | 还原后**逐字节等于原文** | 与 P1 的原始夹具比对 |
-| P6 | fence 不配对 ⇒ 还原抛错且不写 | 手工删掉一个 fence 行 |
-| P7 | **硬链接分离**：用 `linkSync` 造 nlink=2，打补丁后断言「另一个链接指向的文件内容不变」 | masquerade 的核心技术；**必须**有，否则 pnpm store 会被污染 |
-| P8 | 临时文件在成功/失败路径后都不残留 | 断言目录里只剩目标文件 |
-| P9 | 只读文件 ⇒ 抛错、原文件完好 | Windows 下用 `attrib +R` 或 ACL |
-| P10 | 文件不存在 ⇒ 抛错（**不是**静默创建） | — |
-| P11 | marker 在但版本记账缺失 ⇒ 走重新校验分支 | — |
-| P12 | 还原时调用点字面量已被第三方改过 ⇒ 抛错不写 | — |
+| T1 | 三种头容器形态各写一次 ⇒ 三头到位 | `Headers`（`set()`）/ `string[][]`（就地对调保序）/ 普通对象（先删异形键再赋值） |
+| T2 | 同一头名重复对 ⇒ **只留一个**，且留在原位置 | `string[][]` 形态最容易漏；断言长度与顺序 |
+| T3 | 载荷 `undefined` ⇒ **一次都不碰参数** | 断言 `init.headers` 与传入时同一引用 |
+| T4 | 单头写入抛异常 ⇒ **就地吞掉**，其余两头照写 | 造一个 `Headers` 子类让 `set` 抛 `TypeError`（CR/LF 场景） |
+| T5 | 三个头全写失败 ⇒ 返回值表示「没伪装上」，**请求照发** | 绝不外抛 —— 这是与旧引擎「失败即抛」相反的取舍方向（§3.5） |
+| T6 | `init` 缺席 ⇒ 原样转发，**不代造 init** | `fetch(url)` 形态 |
+| T7 | `ensureMasqueradeFetch()` 连调两次 ⇒ **不叠层** | 断言 `globalThis.fetch` 仍是同一个包装函数对象 |
+| T8 | 零载荷下包装器只转发 | 断言 `base` 收到的 `(input, init)` 与调用方传入的逐字段相同 |
+| T9 | `releaseMasqueradeFetch()` 只还原自己那层 | 先套一层外部包装器，再释放 ⇒ 外部那层存活 |
+| T10 | 归一后脏值 ⇒ 当「没有」处理，绝不抛错 | 复用 `normalize*` 的既有用例矩阵（三字段各一份判据） |
 
 ### 10.3 载体与配置必测项
 
@@ -697,46 +691,54 @@ masquerade 的 marker 形态（用于我们的共存检查，**只读不写**）
 
 ### 10.4 变异检验（「改动会被抓住」的证明）
 
-沿用 masquerade 与本仓既有做法，实现后必须逐条做：
+沿用本仓既有做法，实现后必须逐条做。**这一节的变异项全部换过**：旧方案的变异围绕
+「锚点/原子写入/fence」，新方案的变异围绕**三个最容易改错又不会报错的地方**：
 
-| 变异 | 期望变红 |
-|---|---|
-| 锚点匹配改成 `includes` / `trim` | P2 / P3 |
-| 去掉 `rename` 改用 `writeFileSync` | P7 |
-| 还原时不校验 fence 配对 | P6 |
-| 幂等判据改成「总是写」 | P4 |
-| `forwardOptions` 用 `accountHubMasquerade: entry.masquerade`（挂 undefined） | C5 |
-| `entryKey` 漏加 masquerade | C6 |
-| `autoRouteConfigFacts` 漏加 masquerade | C7 |
-| 注入函数在缺省时返回新对象而非原引用 | C1 |
-| 异形键清理去掉 | C3 |
+| 变异 | 期望变红 | 为什么这条最要紧 |
+|---|---|---|
+| ALS 从 `for await` 消费侧**挪到** `ctx.llm.stream()` 创建点 | 接线单测 | 挪过去**不会报任何错**，只是伪装整段静默失效 —— 本设计第一号陷阱（§3.8） |
+| `withMasqueradeAsyncIterable` **只包 `next()`**，不包 `return()` / `throw()` | 接线单测 | 提前退出路径上的清理请求会用错身份（§3.8） |
+| 缺省路径也调 `ensureMasqueradeFetch()`（「反正零载荷只是纯转发」） | 接线单测 | 违反默认路径零变化红线：`globalThis.fetch` 会与加功能前**不是同一个对象**（§3.7） |
+| 身份标记用 `Symbol()` 而非 `Symbol.for(...)` | 安装幂等用例 | 模块被两条路径加载出两份实例时会各装一层 |
+| `string[][]` 形态直接 `push` 新对而不清理重复 | T1 / T2 | 上游会看到拼接值 |
+| 普通对象形态不删异形键 | T1 | `User-Agent` 与 `user-agent` 并存，同样拼成两个头 |
+| 单头写入失败改成 `throw` | T4 / T5 | 把一次配置笔误升级成**请求失败**（与旧引擎的取舍方向恰好相反，§3.5） |
+| `init` 缺席时代造一个 `init` 去补头 | T6 | 替调用方改变请求语义，比不伪装更危险 |
+| `forwardOptions` 用 `accountHubMasquerade: entry.masquerade`（挂 undefined） | C5 | 挂 `undefined` 会**覆盖**调用方带来的值 |
+| `entryKey` 漏加 masquerade | C6 | 只有伪装不同的两条候选被判重、后者静默丢弃 |
+| `autoRouteConfigFacts` 漏加 masquerade | C7 | 用户改了伪装，运行时不重建 |
+| `normalize*` 里改成抛错而非「当没有」 | T10 | 出站面抛错会毁掉一次对话 |
 
 ### 10.5 回归基线
 
 | 项 | 目标 |
 |---|---|
-| `pnpm test` | **3749 例全绿**（= 3662 基线 + 卡 1 的 `masquerade-patch.spec.ts` 59 例 + 卡 2 的 `auto-route-masquerade.spec.ts` 28 例；卡 3 未加新用例。含 16 例 `account-hub-header-overrides.spec.ts` + 81 例 `auto-route-adapter.spec.ts` 两个直接相关套件） |
-| `pnpm typecheck` | 绿 |
-| `pnpm build:client` | 绿，**且产物顶层求值冒烟保留** |
+| `pnpm test` | **全绿**。各直接相关套件实测例数：`masquerade-transport.spec.ts` **30 例**、`masquerade-transport-wiring.spec.ts` **15 例**、`auto-route-masquerade.spec.ts` **23 例**、`account-hub-header-overrides.spec.ts` **16 例**（一例不改）、`auto-route-adapter.spec.ts` **81 例**。⚠️ 旧的 `masquerade-patch.spec.ts` **59 例已随 §0.1 删除**，故聚合总数**必须重新以 `pnpm test` 的实测输出为准**，不要沿用旧文档记的 3749 |
+| `pnpm typecheck` | 绿（`src/` 在视野内） |
+| `pnpm build:client` | 绿，**且产物顶层求值冒烟保留**（AGENTS.md 已列为勿删项） |
 | `pnpm build:all` | 绿 |
 
 ---
 
 ## 11. 风险清单
 
+> **旧方案 R1–R5 已整批消失**（随 §0.1 退役）：它们全部以「我们改了宿主磁盘上的文件」
+> 为前提 —— 补丁落到源码 checkout（R1）、升级后锚点漂移（R2）、自动维持盲目重写（R3）、
+> 与第三方补丁抢锚点竞态（R4）、单边还原后开关与实效不一致（R5）。
+> 新方案**不写任何宿主文件**，这五条风险的载体本身不存在，故不再逐条保留。
+
 | # | 风险 | 严重度 | 缓解 |
 |---|---|---|---|
-| **R1** | 补丁落到**源码 checkout**（`packages/llm/llm-pi-ai/lib/index.js`），污染开发者的工作树；`git status` 会脏 | 中 | ① 面板与文档**明确告知**；② 该文件在 `lib/`（gitignore 产物），不进版本控制；③ **零配置自动还原**（清空全部条目伪装头，见 §13 分叉 f）；④ `tsc` 重建即还原 |
-| **R2** | 升级后锚点漂移 ⇒ 自动维持**报错**而非自愈，用户看到红色徽标但不懂 | 中 | 徽标文案给出**可执行的下一步**（「请升级 dsh-account-hub 到支持该版本的最新版」），并在日志里打印实测到的版本号 |
-| **R3** | 自动维持**盲目重写**导致把已漂移的文件改坏 | **高** | 每次维持都走完整判据链，任一不过即**不写**（§3.5） |
-| **R4** | 与 masquerade 的自动维持**竞态**（同时读改写） | 中 | 维持前检测对方 marker；在场则只校验自己的段、不整文件重写 |
-| **R5** | 单边还原后「开关还开着但伪装已失效」，用户无感 | **高** | 面板徽标**必须**反映「本方补丁在场」与「依赖的对方补丁在场」两个独立状态，任一缺失即黄色告警 |
-| ~~**R6**~~ | ~~`x-dsh-body-masquerade` 的**动态注入**未真机验证~~ | — | **已随 §13 分叉 e 裁撤**：body 伪装整体不做，该头**不发送**，风险不存在。原条目仅存档 |
-| **R7** | `discoverModels` 的模型列表路径（`dsh-llm-pi-ai/lib/index.js:2308` 的 `attributionHeaders()`）**仍是框架 UA**，未被伪装 | 低 | 4router 的 `/v1/models` **当前只校验 token、无闸门**（实测）；记入文档，不在 v1 处理 |
-| **R8** | qoder CN 走 wasm 签名链 ⇒ 覆写**不生效**（既有已知边界） | 低 | 与本次无关（本设计只针对外部 provider）；但预设下拉若出现在 qoder 候选上会误导 ⇒ 面板可按 provider 置灰（可选） |
-| **R9** | 伪装本身可能违反对方服务条款 / 导致账号风险 | 中 | **用户自担**；面板上给出一次性告知文案 |
-| **R10** | 客户端新增下拉的模板字符串错误**不在 typecheck 视野内**（`plugin-src/` 不被 `tsconfig.json` include） | 中 | 两道闸：① 渲染级单测（15 个 spec 真渲染，见 §10.1）；② `build:client` 的产物顶层求值冒烟**必须保留**（AGENTS.md 已列为勿删项），它覆盖单测覆盖不到的**打包产物顶层**求值 |
-| **R11** | 预设字面量手抄错（UA 少一个下划线）⇒ 403 且**无任何可归因报错** | **高** | 常量以 masquerade 为唯一真相源；单测钉住对照断言（§4.3） |
+| **R1′** | 包装的是**进程级** `globalThis.fetch` ⇒ 装上以后**所有**走 fetch 的出站请求都经过这层（包括别的插件的） | 中 | ① **按需安装**：仅当载荷非 `undefined` 时才装（§3.7）⇒ 默认路径下它压根不存在；② 包装器对非伪装请求**只转发**，`base(input, init)` 原样透传、连 `init` 字段都不读；③ `releaseMasqueradeFetch()` 只还原自己那层（§3.6） |
+| **R2′** | ALS 上错位置（加在创建点而非消费侧）⇒ 伪装**整段静默失效**，且**不报任何错** | **高** | 这是本设计最容易改错处（§3.8）。缓解：① 接线单测断言载荷在 `for await` 侧可见（§10.2 T 组）；② API 形态上只暴露 `withMasqueradeAsyncIterable(payload, stream)` 这一个入口，不提供「绑定创建点」的写法 |
+| **R3′** | `init.headers` 只读 guard / 单头值非法 ⇒ 写入抛异常 | 低 | 单头异常**就地吞掉**，其余两头照写；一个都没写成功也只是「这次没伪装」，**绝不升级成请求失败**（§3.5）。取舍方向与旧引擎「失败即抛」**相反**，理由见 §3.5 |
+| **R4′** | `masquerade.status` 曾报「可用」而实际未伪装，用户以为已生效 | 低 | 面板徽标现在只有一个正向态 `AUTO_ROUTE_MASQUERADE_READY`「出站伪装已就绪」，其依据是「运输层在进程内、RPC 能应答」；**不承诺**上游闸门一定放行（残余风险见 §13 分叉 e） |
+| **R5′** | `discoverModels` 的模型列表路径（`dsh-llm-pi-ai/lib/index.js:2308` 的 `attributionHeaders()`）**仍是框架 UA**，未被伪装 | 低 | 4router 的 `/v1/models` **当前只校验 token、无闸门**（实测）；记入文档，不在 v1 处理 |
+| **R6′** | qoder CN 走 wasm 签名链 ⇒ 覆写**不生效**（既有已知边界） | 低 | 与本次无关（本设计只针对外部 provider）；但预设下拉若出现在 qoder 候选上会误导 ⇒ 面板可按 provider 置灰（可选） |
+| **R7′** | 伪装本身可能违反对方服务条款 / 导致账号风险 | 中 | **用户自担**；面板上给出一次性告知文案 |
+| **R8′** | 客户端下拉的模板字符串错误**不在 typecheck 视野内**（`plugin-src/` 不被 `tsconfig.json` include） | 中 | 两道闸：① 渲染级单测（15 个 spec 真渲染，见 §10.1）；② `build:client` 的产物顶层求值冒烟**必须保留**（AGENTS.md 已列为勿删项），它覆盖单测覆盖不到的**打包产物顶层**求值 |
+| **R9′** | 预设字面量手抄错（UA 少一个下划线）⇒ 403 且**无任何可归因报错** | **高** | 常量以 masquerade 的 `PRESETS` 为唯一真相源；单测钉住对照断言（§4.3） |
+| ~~**R10′**~~ | ~~`x-dsh-body-masquerade` 的动态注入未真机验证~~ | — | **已随 §13 分叉 e 裁撤**：body 伪装整体不做，该头**不发送**，风险不存在 |
 
 ---
 
@@ -747,14 +749,14 @@ masquerade 的 marker 形态（用于我们的共存检查，**只读不写**）
 
 | # | 验证项 | 判据 |
 |---|---|---|
-| V1 | 打补丁后 DSH 冷启动，`dsh-llm-pi-ai` 正常加载 | 无 `SyntaxError`；模型目录正常 |
+| V1 | 配了伪装的候选发一次真实请求，DSH 正常完成这一轮 | 无异常；模型正常回字（本方案不改宿主文件，故**没有**「冷启动能否加载」这类验证项 —— 那一条已随 §0.1 消失） |
 | V2 | 候选配 `codex` 预设 → 4router 请求 | **HTTP 200**（对照：关闭时 403） |
-| ~~V3~~ | ~~`x-dsh-body-masquerade` 的动态注入真的被 body 补丁读到~~ | **已随 §13 分叉 e 裁撤**：body 伪装不做、该头不发送，验证对象不存在 |
-| V4 | 关闭预设 → 出站头与加功能前**逐字节一致** | 抓包对照 |
-| V5 | 未配伪装的候选 → 出站头不受补丁存在与否影响 | 抓包对照（打补丁 / 还原两态） |
-| V6 | 在 checkout 跑一次 `tsc` → 面板徽标变红 → 自动维持自愈 | 徽标颜色与文件 marker 状态一致 |
-| V7 | **清空全部条目的伪装头** → 维持循环**自动还原** → 文件与打补丁前逐字节一致 | 哈希比对（触发方式是清空条目，**不是**点按钮 —— §13 分叉 f） |
-| V8 | 与 masquerade 同时安装 → 双方各自单独还原，另一方不受影响 | 四种组合各跑一次（组合数已随 body 裁撤减少，见 §7.2） |
+| V3 | 抓包看三个头**都在**：`User-Agent` = 预设值、`Originator` 存在、`x-codex-window-id` 存在 | 三个头缺任何一个都算未通过；`x-codex-window-id` 的值应与该条 `entry.masquerade.windowId` 一致 |
+| V4 | 关闭预设（或未配伪装的候选）→ 出站头与加功能前**逐字节一致** | 抓包对照。这是**默认路径零变化**红线的真机判据（§3.7） |
+| V5 | 同一条候选连发多次 → `x-codex-window-id` **每次都相同** | 它取自条目里已存的值，**不在运行时轮换**（§4.4、分叉 c） |
+| V6 | 提前中断一次带伪装的流（`break` / 取消），再发一次带伪装的请求 | 两次都能正常出网 ⇒ 证明 `return()` 路径上的载荷没掉（§3.8 那条最容易改错的纪律） |
+| V7 | **清空全部条目的伪装配置** → 再发请求 | 出站回到归属 UA；**没有「还原文件」这一步可验证**，因为从未改过任何文件（旧 V7 的哈希比对已随 §0.1 消失） |
+| V8 | 与 `shabhui/dsh-client-masquerade` 同时安装 → 双方各自工作 | 本方案的值在对方基线之上覆写（§7.2）；对方还原时本方案不受影响 |
 | V9 | 七个 provider 的既有链路无回归 | `pnpm test` 全绿 + 任选一家真机请求 |
 
 ---
@@ -784,7 +786,10 @@ masquerade 的 marker 形态（用于我们的共存检查，**只读不写**）
 
 ### ★ 分叉 d：告警形态 — **拍板：D2（日志 + 面板徽标 + 首次失败在会话内插可见提示）**
 
-理由：R5（伪装静默失效）严重度高，纯日志不够；D3 拦请求代价过高。
+理由：伪装静默失效后果严重（请求照样发出去、只是身份没伪装上，没有任何可归因报错），
+纯日志不够；D3 拦请求代价过高。
+（旧文此处引用的「R5 单边还原后开关与实效不一致」已随 §0.1 消失 —— 新方案没有可失效的
+磁盘状态。**结论 D2 本身保留**，但徽标收敛为一个正向态，见 §5.2。）
 
 ### ★ 分叉 e：body 伪装是否进 v1 — **拍板：E1 修订版（不做，且不做任何检测/引导）**
 
@@ -795,31 +800,38 @@ body 伪装整体不做（E1），同时**不实现** E3 的检测与引导 UI�
 本方案落地的是前三者（头全套）——该组合未实测过，若 4router 闸门仍拒，
 说明其校验进入请求体层面，届时再另立方案（届时再议，本设计不预留接口）。
 
-### ★ 分叉 f：还原入口与「无开关自动维持」的冲突 — **拍板：F4（不做还原按钮，零配置即还原）**
+### ★ 分叉 f：还原入口 — **拍板：F4 的结论保留，但理由已换（不做还原按钮）**
 
-不提供任何手动还原入口。维持逻辑：**没有任何条目配置伪装头 ⇒ 补丁不打；
-打了的自动还原**。用户想让伪装彻底消失，把所有条目的伪装清掉即可，
-插件随即自动还原官方文件。四个 F 选项中 F1/F2/F3 的「按钮 + 状态」全部不做。
+**不提供任何手动还原入口**（UI 上没有任何按钮）。旧 F4 的理由是「零配置即自动还原官方
+文件」；新方案下**根本没有需要还原的东西** —— 我们从不写宿主文件（§3.1）。用户想让伪装
+彻底消失，把所有条目的伪装清掉即可：那时**一个请求都不会装包装器**（载荷全 `undefined`），
+出站自然地回到加入本功能之前的状态。四个 F 选项中 F1/F2/F3 的「按钮 + 状态」全部不做。
 
-### 分叉 g：补丁落点的最终选择 — **拍板：G1（`dsh-llm-pi-ai` 调用点，v1）**
+### 分叉 g：落点的最终选择 — **已随 §0.1 改判：不设落点**
 
-`dsh-llm-pi-ai/lib/index.js` 调用点 `:1883` 包一层 + EOF 追加注入函数。
-与 masquerade 的 UA 补丁（`:1732-1740` 函数体）零重叠、可共存。
+旧拍板 G1 选的是 `dsh-llm-pi-ai/lib/index.js` 调用点 `:1883` 包一层 + EOF 追加注入函数。
+该落点**连同整个补丁引擎一并退役**，理由见 §0.1.2（那两条候选路径与宿主实际加载的
+`app.asar` 内 rc.2 副本永不相交）。现行落点是 `globalThis.fetch` 包装器（§3.1），
+**没有目标文件**，故「锚点是否与 masquerade 重叠」这类问题不再存在（§7.1）。
 （分叉 e 已裁定不做 body ⇒ G2/G3 不再相关。）
 
-### 分叉 h：头部运输层 — **拍板：H1（新载体 `accountHubMasquerade`，不写用户 profile 配置）**
+### 分叉 h：头部运输层 — **拍板：H1 的原结论保留，实现形态已换代**
 
-理由：H2 要写 `~/.dsh` 下的用户数据（profile `cordis.patch.yml`），越出本仓红线；
-H1 只改包文件、走插件内部协议通道。
+结论不变：**新载体 `accountHubMasquerade`，不写用户 profile 配置**。理由仍是 H2 要写
+`~/.dsh` 下的用户数据（profile `cordis.patch.yml`），越出本仓红线。
+实现形态从「宿主文件里的注入函数读该字段」换成「运输层读同源载荷写进 `init.headers`」
+（§3.3、§3.9）—— **载体字段仍在天上飞，只是消费点变了**。
 
 ### 分叉 i：谁提供 body 补丁 — **已随分叉 e 裁定而不成立（不适用）**
 
 body 伪装整体不做，本分叉消解。
 
-### 分叉 j：低频定时维持 — **拍板：J2（加 5 分钟低频定时维持）**
+### 分叉 j：低频定时维持 — **已随 §0.1 作废（机制整体不需要）**
 
-三个触发点（启动 / 面板打开 / 保存配置）之外，再加 5 分钟定时自检。
-S1 在本机是高概率事件（补丁落在 checkout 里，开发者一 rebuild 就没了）。
+旧拍板是「加 5 分钟低频定时自检」，用来兜住「补丁落在 checkout 里、开发者一 rebuild
+就没了」。新版**一个宿主文件都不写**，没有「被 rebuild 抹掉」这回事，故**不存在需要
+定时自检的对象**，该定时器不实现。安装动作只发生在载荷非 `undefined` 的请求路径上
+（§3.7）。
 
 ---
 
@@ -827,10 +839,10 @@ S1 在本机是高概率事件（补丁落在 checkout 里，开发者一 rebuil
 
 | 事实 | 出处 |
 |---|---|
-| 调用点锚点 `\t\t\t\t\theaders: requestHeaders(profile.headers)` 全文唯一命中（1 hit，5 前导 Tab，45 字节） | `~/.dsh/profiles/node_modules/@deepseek-ai/dsh-llm-pi-ai/lib/index.js:1883` |
-| `requestHeaders()` 归属头碰撞语义（9 行函数体） | 同上 `:1732-1740` |
-| `profileOptions()` 白名单（**不含 headers**） | 同上 `:1669-1682` |
-| `options` 在调用点已在作用域内 | 同上 `:1879-1882` |
+| ~~调用点锚点 `\t\t\t\t\theaders: requestHeaders(profile.headers)` 全文唯一命中（1 hit，5 前导 Tab，45 字节）~~ **（历史存档：旧补丁引擎的落点锚点，已随 §0.1 退役 —— 现行方案没有落点，也就没有锚点）** | ~~`~/.dsh/profiles/node_modules/@deepseek-ai/dsh-llm-pi-ai/lib/index.js:1883`~~ |
+| `requestHeaders()` 归属头碰撞语义（9 行函数体）**（仍有效：这正是现行方案要绕开的那个碰撞，见 §3.2）** | 同上 `:1732-1740` |
+| `profileOptions()` 白名单（**不含 headers**）**（仍有效：`headers` 到不了 `profileOptions`，故必须另找通道）** | 同上 `:1669-1682` |
+| ~~`options` 在调用点已在作用域内~~ **（历史存档：为旧注入函数论证作用域可见性，现无注入函数）** | ~~同上 `:1879-1882`~~ |
 | `discoverModels` 的归属头（未伪装路径） | 同上 `:2308` |
 | `attributionHeaders()` 实测值 `{ 'user-agent': 'deepseek-harness/<版本> (+https://github.com/deepseek-ai/deepseek-harness)' }` | `@deepseek-ai/dsh-llm/lib/index.js:770-794` |
 | `dsh-llm-pi-ai` 是 ESM（`"type":"module"`、`main: lib/index.js`）、`exports` **含** `./package.json` | 该包 `package.json` |
@@ -839,15 +851,15 @@ S1 在本机是高概率事件（补丁落在 checkout 里，开发者一 rebuil
 | pi-ai `buildParams` 尾部 `Object.assign(params, options.samplingParams)` | 同上 `:272-275` |
 | `streamSimple` 把 `options.headers` 透传 | 同上 `:162-174` |
 | pi-ai `buildBaseOptions` 透传 `headers` | `pi-ai/dist/api/simple-options.js:10-35` |
-| Junction / Symlink 三级链与 `nlink=1`、`fsutil hardlink list` 单路径 | 本机实测（§3.7） |
+| ~~Junction / Symlink 三级链与 `nlink=1`、`fsutil hardlink list` 单路径~~ **（历史存档：那是为「原子替换写回会不会污染 pnpm store」做的实测，随 §0.1 退役 —— 现行方案零文件 IO，「写回」这回事不存在）** | ~~本机实测（旧 §3.7，该节已删）~~ |
 | masquerade 的 codex 指纹常量（`revision: 2` / `engineHeader: x-codex-window-id` / `identityInstructions` / `defaults` / 来源版本）（**body 路线已裁撤，仅存档**；本设计只沿用 `engineHeader` 这一项） | `shabhui/dsh-client-masquerade/patches/codex-fingerprint.js` |
 | masquerade 的 body 补丁两锚点与目标解析方式（`--target` / 向上找 profile / `REL = node_modules/@earendil-works/pi-ai/dist/api/openai-responses.js`）（**body 路线已裁撤，仅存档**） | `…/patches/apply-pi-ai-codex-body-patch.mjs` |
-| 本机当前**未安装** masquerade、三个 marker **均不在场** | 实测（§7.4） |
+| ~~本机当前**未安装** masquerade、三个 marker **均不在场**~~ **（历史存档：旧「三个 marker」是补丁引擎写在宿主文件里的落点标记，随 §0.1 退役 —— 现行方案不写宿主文件，没有可检测的落点；唯一的 marker 是 `globalThis.fetch` 包装器身上的 `Symbol.for('dsh-account-hub.masquerade-transport.fetch')`，进程内取用，见 §3.6）** | ~~实测（旧 §7.4，该节已删）~~ |
 | `autoRoute` 整块是 `Schema.any()`，形状判据唯一真相源在 `src/auto-route.ts` | `src/account-pool.ts:246-258` |
 | 九字段与 `persist()` 逐字段枚举 | 同上 `:225-267` |
-| `forwardOptions()` 的两行注入形态 | `src/auto-route-adapter.ts:401-411` |
+| `forwardOptions()` 的**三行**注入形态（`accountHubUserAgent` / `accountHubOriginator` / `accountHubMasquerade`，缺省各不挂键） | `src/auto-route-adapter.ts:466-477` |
 | `autoRouteConfigFacts()` 的键序纪律与 `null` 占位 | `src/auto-route.ts:150-195` |
-| `entryKey()` 含 userAgent / originator | 同上 `:436-438` |
+| `entryKey()` 含 userAgent / originator / `masquerade.windowId`（三者任一不同的两条候选必须判为不同条目） | 同上 `:551-570` |
 | `readEntry()` 「只丢字段、不丢条目」 | 同上 `:394-420` |
 | 候选编辑弹窗五行与既有常量 | `plugin-src/client/account-hub.js:2524-2660`、`:2281-2331` |
 | `setEntryField` 的逐字段分支（含真机缺陷教训） | 同上 `:2940-2976` |
@@ -857,4 +869,4 @@ S1 在本机是高概率事件（补丁落在 checkout 里，开发者一 rebuil
 | `plugin-src/` 不在 **typecheck** 视野（`tsconfig.json` 只 include `src/`），`build:client` 冒烟是**打包产物顶层**求值的唯一防线 | `AGENTS.md` |
 | 但 `plugin-src/client/` **有渲染级单测**：15 个 spec 真渲染它（含 `auto-route-panel.spec.ts` 41 例、`qoder-hub-blank-screen` / `account-order-panel` / `account-consumption-panel` 等） | 本仓实测（卡 3 交叉核对） |
 | 出站协议值红线 | `AGENTS.md`「LLM Provider 约定」 |
-| 测试基线 3749 例全绿（3662 基线 + 卡 1 的 59 + 卡 2 的 28） | 本仓实测 |
+| ~~测试基线 3749 例全绿（3662 基线 + 卡 1 的 59 + 卡 2 的 28）~~ **（历史存档：那个总数含已删除的 `masquerade-patch.spec.ts` 59 例，**不得沿用** —— 现行基线以实测输出为准，见 §10.5）** | ~~本仓实测~~ |

@@ -15,9 +15,6 @@
  *           model.list / model.setDisabled / model.setContextBudget
  */
 
-import { dirname, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
-
 import type { Context } from '@deepseek-ai/cordis'
 import { credentialRef, isCredentialRefName, type CredentialRef } from '@deepseek-ai/dsh-credentials'
 import { AccountPool } from './account-pool.js'
@@ -146,142 +143,29 @@ import {
   checkAccountHubUpdate,
   type AccountHubUpdateDeps,
 } from './account-hub-update.js'
-// 客户端伪装补丁引擎（卡片 1）。本文件只用它的**查询/维持**三个入口：
-// - `runMasqueradeMaintenance`：三个触发点（面板打开 / 配置保存 / 定时器）共用的一次维持
-// - `resolvePatchedTarget` + `inspectPatch`：`masquerade.status` 的**只读**数据源
+// ────────────────── 客户端伪装：运输层状态面 ──────────────────
 //
-// ⚠️ 刻意**不用** `maintainPatches`：那个函数还负责挂定时器（卡片 1 已在 `src/index.ts`
-// 挂好），RPC 层再挂一次会得到两个 5 分钟定时器 —— 触发点 ②③ 按设计稿 §3.8 直接调
-// `runMasqueradeMaintenance`（见 `src/masquerade-patch.ts` 中该函数的 JSDoc）。
-import {
-  inspectPatch,
-  resolvePatchedTarget,
-  runMasqueradeMaintenance,
-  type MasqueradeMaintenanceDeps,
-  type MasqueradeMaintenanceResult,
-  type MasqueradeTargetLookup,
-} from './masquerade-patch.js'
-
-// ────────────────── 客户端伪装补丁：RPC 层（触发点 ② 与 ③） ──────────────────
+// 伪装已**不再是**「往宿主磁盘上打补丁」（那套引擎整体退役：它的目标解析在
+// installation-first 的宿主里永远打不中真文件），而是由运输层
+// （`src/account-hub-masquerade-transport.ts`）在请求出网前就地改写请求头 —— 它随插件
+// 进程一起装载，没有「打没打上」这种可失败状态，故 RPC 层这一面只剩**可用性声明**。
 //
-// 设计稿 `docs/agents/client-masquerade-design.md` §3.8 的四个检查点里，本文件负责
-// ②（面板打开）与 ③（保存配置），①（插件启动）与 ④（5 分钟定时器）由 `src/index.ts`
-// 的 `maintainPatches` 负责。两处**共用同一个** `runMasqueradeMaintenance`，绝不复制
-// 第二份判据链。
-//
-// ⚠️ 刻意**不**用 `maintainPatches`：那个函数除了跑一次维持，还会挂一个 5 分钟定时器
-// ——RPC 层再挂一次会得到两个定时器（同一个文件被两把周期写互相打断）。
+// 何时装载由接线方（聚合适配器）决定，本文件不碰它，只回答「这个进程里运输层在不在」。
 
 /**
- * `available: false` 时的固定中文原因。
+ * 运输层可用性响应的**唯一真相源**（`masquerade.status` 与 `masquerade.apply` 共用）。
  *
- * 与面板常量 `AUTO_ROUTE_MASQUERADE_UNAVAILABLE`（`plugin-src/client/account-hub.js`）
- * **必须逐字同句**：宿主回这句话、面板照原样显示。面板是 esbuild 进 bundle 的独立
- * 产物，宿主无法 import 它的常量，故这里是同句的**第二份字面量**（设计稿 §5.4）。
+ * `available` 恒为 `true`：本模块与运输层同属一个插件进程，能走到这个 case 就说明它
+ * 已随模块加载（运输层模块本身零副作用，安装动作由接线方显式触发）。写成常量而不是
+ * 现算，是为了让两个方法**逐字节同源** —— 客户端调哪一条都得到同一个结论。
+ *
+ * `transport` 是**实现标识**而不是开关：`'als-fetch'` = `AsyncLocalStorage` 绑定本次
+ * 请求的载荷 + `globalThis.fetch` 包装器在出网前写头。将来换实现只改这个值，字段形状不变。
  */
-const MASQUERADE_UNAVAILABLE_REASON = '当前环境未安装外部 provider 适配器'
-
-/** 查询本身炸掉时的兜底原因前缀（契约上不可达，见 {@link masqueradeValueOf}）。 */
-const MASQUERADE_STATUS_FAILED_REASON = '伪装状态查询失败'
-
-/**
- * 把原因文本补成**以中文开头**的一句（面板是中文界面，裸的 `EISDIR: illegal operation…`
- * 直接显示等于把底层 errno 丢给用户）。
- *
- * ## 为什么需要它
- *
- * `masquerade-patch.ts` 的原因有**两个来源**，语言纪律不一致：
- * - 判据链自己抛的（锚点零命中 / 围栏不配对…）**本来就是中文**，逐字保留；
- * - 读文件失败那条走的是 `describe(error)`，即 `readFileSync` 的**英文 errno 文本**
- *   （卡片 1 刻意不翻译它 —— 那个模块不面向界面，英文原文对排查更有用）。
- *
- * 故这里只做**补前缀**，绝不改写已有中文：`inspectPatch` 的判据链原因与卡片 1 的
- * 单测断言（`masquerade-patch.spec.ts` 逐字比对那些句子）都依赖原文不变。
- */
-function withChineseLead(reason: string): string {
-  return /^[\u4e00-\u9fa5]/.test(reason) ? reason : `${MASQUERADE_STATUS_FAILED_REASON}：${reason}`
-}
-
-/**
- * 跑一次维持，**任何异常只进日志**（触发点 ②③ 的 fire-and-forget 形态）。
- *
- * `runMasqueradeMaintenance` 契约上不抛（判据链的全部异常都在它内部收敛成 `failed`），
- * 这里再包一层是**结构性保证**：维持是旁路，它的任何意外都不该让一次 `autoroute.get`
- * （只读配置）或 `autoroute.set`（配置早已写成功）失败。
- *
- * 日志纪律与 `maintainPatches` 内部的 `report()` 对齐：
- * - `failed` 的原因**已由引擎自己 warn 过一次**（`runMasqueradeMaintenance` 内），不重复；
- * - `reverted`（自动还原）是成功路径，但它是「补丁悄悄消失」的唯一痕迹，必须留一条。
- *
- * @returns 维持结果；意外抛错时 `undefined`（调用方按「状态未知」处置）。
- */
-function runMasqueradePassQuietly(
-  deps: MasqueradeMaintenanceDeps,
-): MasqueradeMaintenanceResult | undefined {
-  try {
-    const result = runMasqueradeMaintenance(deps)
-    if (result.status === 'reverted') {
-      deps.logger?.warn(
-        `[account-hub] 已无候选配置伪装头，客户端伪装补丁已自动还原：${result.target ?? ''}`,
-      )
-    }
-    return result
-  } catch (error) {
-    deps.logger?.warn(
-      `[account-hub] 客户端伪装补丁维持未能执行（该功能本次跳过）：${error instanceof Error ? error.message : String(error)}`,
-    )
-    return undefined
-  }
-}
-
-/**
- * 把「维持结果 + 只读巡检」收敛成 `masquerade.status` / `masquerade.apply` 的**唯一**
- * 响应形状（设计稿 §5.3 两个方法出参完全相同，差别只在纪律）。
- *
- * ## 为什么两个数据源都要
- *
- * - **巡检**（`inspectPatch`）答的是「文件**此刻**在不在场」—— 这正是 `applied` 的语义；
- * - **维持结果**答的是「本次为什么没打成」。两者互补而非重复：版本漂移时文件是**原厂**
- *   形态（巡检 `reason` 为空），而用户需要的恰恰是维持给出的那句「调用点锚点零命中」
- *   ——只报巡检会把「版本不匹配」笼统显示成「未打补丁」（§5.4 的第四个常量就没用了）。
- *
- * ## 「永不抛错」是保证，不是期望
- *
- * 本函数的返回值直接进 `masquerade.status` 的响应体，而面板把异常显示成「加载失败」会把
- * 「查不出来」误导成「功能坏了」（与 `autoroute.model-info` 同款契约）。故整段包在 try 里。
- *
- * @param pass - 本次维持结果；`undefined` = 维持本身意外抛错（状态未知）。
- */
-function masqueradeValueOf(
-  lookup: MasqueradeTargetLookup,
-  pass: MasqueradeMaintenanceResult | undefined,
-): RpcMasqueradeResponse {
-  try {
-    const target = resolvePatchedTarget(lookup)
-    if (target === undefined) {
-      return { available: false, applied: false, reason: MASQUERADE_UNAVAILABLE_REASON }
-    }
-    const inspection = inspectPatch(target.file)
-    // 巡检的原因优先（它答的是「此刻文件怎么了」）；巡检无话可说但维持失败时，用维持
-    // 那句（版本漂移的「锚点零命中」只存在于维持结果里）。
-    const raw = inspection.reason ?? (pass?.status === 'failed' ? pass.reason : undefined)
-    const reason = raw === undefined ? undefined : withChineseLead(raw)
-    return {
-      available: true,
-      applied: inspection.patched,
-      ...reason === undefined ? {} : { reason },
-      // 版本读不到（`package.json` 缺失/损坏）⇒ 字段缺席，**不补猜测值**：面板据此
-      // 区分「未打补丁」与「版本不匹配」，编造一个版本号会让它按假信息下结论。
-      ...target.version === undefined ? {} : { targetVersion: target.version },
-    }
-  } catch (error) {
-    return {
-      available: false,
-      applied: false,
-      reason: `${MASQUERADE_STATUS_FAILED_REASON}：${error instanceof Error ? error.message : String(error)}`,
-    }
-  }
-}
+const MASQUERADE_TRANSPORT_STATUS: RpcMasqueradeResponse = Object.freeze({
+  available: true,
+  transport: 'als-fetch',
+})
 
 /** Account Hub RPC API 路径 */
 export const ACCOUNT_HUB_API_PATH = '/api/account-hub'
@@ -1949,19 +1833,6 @@ export interface AccountHubRpcOptions {
   onAutoRouteChanged?: () => void
   /** 可选更新依赖；headless 测试可省略，更新端点调用时会返回规范错误。 */
   updateDeps?: AccountHubUpdateDeps
-  /**
-   * 可选的**伪装补丁目标解析来源**（见 `src/masquerade-patch.ts` 的
-   * {@link MasqueradeTargetLookup}）。
-   *
-   * 省略时按本文件产物位置现推 profile 根、并转交宿主 `ctx.dshHomePath`（生产路径）。
-   * 之所以留这个口子：伪装补丁会**真的改磁盘文件**，故「打了没打」这类判据只能在
-   * 临时目录夹具上验证 —— 没有这个字段，单测就只能对着机器上真实存在的
-   * `@deepseek-ai/dsh-llm-pi-ai` 断言，那既不可重复也会污染开发机。
-   *
-   * ⚠️ **只覆盖两个路径来源**，`readAutoRouteConfig`（池的实时配置）与 `logger`
-   * 一律由本文件内部绑定：它们是**行为**而非环境，放开会让单测测到与生产不同的判据链。
-   */
-  masqueradeLookup?: MasqueradeTargetLookup
 }
 
 /**
@@ -2079,49 +1950,6 @@ function registerAccountHubEndpoints(options: AccountHubRpcOptions): void {
    * {@link collectProviderBalances}）。
    */
   const balanceDeps: ProviderBalancesDeps = { ctx, pool, qoder, qoderCn }
-
-  /**
-   * 客户端伪装补丁的**目标解析来源**（见 `src/masquerade-patch.ts` 的
-   * {@link MasqueradeTargetLookup} 与 `resolvePatchedTarget`）。
-   *
-   * ## 为什么这里要自己推一遍 profile 根
-   *
-   * `src/index.ts` 的伪装维持段（触发点 ①/④）已经推过一份，但那是**另一个模块的闭包**，
-   * 本文件拿不到；而 `MasqueradeMaintenanceDeps` 只收两个字符串来源、不收 `ctx`（卡片 1
-   * 刻意把引擎做成不依赖宿主上下文，便于单测注入假对象）。故这里按**同一条推导**再算一次：
-   * 本文件在产物里落在 `<profile>/node_modules/dsh-account-hub/lib/`，上溯三级即 profile 根
-   * （与 `createAccountHubUpdateDeps` 逐字同款）。抽成公共函数的代价是新增一个只为一行
-   * `resolve` 存在的模块，不值得。
-   *
-   * ## 两个来源都给，由引擎各自独立命中
-   *
-   * 目标包在本机实测只存在于**共享层**（`<dsh home>/profiles/node_modules/...`），profile
-   * 层候选在部分机器上并不存在；全缺 ⇒ 静默 `unavailable`（该 profile 没装外部适配器，
-   * 不是错误）。这与 `src/index.ts` 的处置完全一致。
-   *
-   * ⚠️ `dshHomePath` **必须包一层**：宿主解析器的实现可能依赖 `this`（`src/account-pool.ts`
-   * 的迁移路径就是**不带接收者**调用它的），直接转交会在那种实现上抛错。
-   *
-   * ⚠️ 宿主未注册该服务时读成 `undefined`（**不是错误**）：那时只剩 profile 层候选，
-   * 由引擎自行判定 `unavailable`。刻意**不**在这里抛错 —— 伪装不可用不该让端点注册失败。
-   *
-   * ⚠️ `options.masqueradeLookup` **只覆盖这两个路径来源**（单测用临时目录夹具），
-   * 未给字段才落到上面的生产推导；`readAutoRouteConfig` 与 `logger` 永远由本文件绑定。
-   */
-  const hostDshHomePath = ctx.dshHomePath
-  const masqueradeLookup: MasqueradeTargetLookup = {
-    dshHomePath: hostDshHomePath === undefined ? undefined : (...segments) => hostDshHomePath(...segments),
-    profileRoot: resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..'),
-    ...options.masqueradeLookup,
-  }
-  const masqueradeDeps: MasqueradeMaintenanceDeps = {
-    dshHomePath: masqueradeLookup.dshHomePath,
-    profileRoot: masqueradeLookup.profileRoot,
-    // 判据链的第一问「有没有条目配了伪装头」的唯一数据源：池的实时配置（`autoRouteConfig()`
-    // 每次都深拷贝 + 过 `sanitizeAutoRouteConfig`，故读到脏值已被清洗）。
-    readAutoRouteConfig: () => pool.autoRouteConfig(),
-    logger: ctx.logger,
-  }
 
   /**
    * 执行自动签到（`checkin.perform` / `checkin.sweep` 共用）。
@@ -3249,14 +3077,6 @@ function registerAccountHubEndpoints(options: AccountHubRpcOptions): void {
       // 返回值经 `sanitizeAutoRouteConfig`（池内已做一次，这里不重复）：池的
       // `autoRouteConfig()` 本身就返回深拷贝，客户端改它不会串到池内状态。
       case 'autoroute.get': {
-        // ★ 触发点 ②（面板打开，设计稿 §3.8）：面板挂载时拉的正是这一条，故维持的
-        // 单次检查**搭在它上面**，客户端一行都不用改（`masquerade.status` 是卡片 3
-        // 的徽标才需要的调用，此刻面板还没发它）。
-        //
-        // ⚠️ **fire-and-forget 且自吞异常**：这是一次**只读**配置查询，补丁维持是
-        // 旁路 —— 它失败绝不能让面板打开失败（那会让「伪装打不上」升级成「自动路由
-        // 页面打不开」）。同步函数、不 await，与 `onAutoRouteChanged` 同款处置。
-        runMasqueradePassQuietly(masqueradeDeps)
         const config = pool.autoRouteConfig()
         const value: RpcAutoRouteGetResponse = {
           enabled: config.enabled,
@@ -3321,15 +3141,10 @@ function registerAccountHubEndpoints(options: AccountHubRpcOptions): void {
             ctx.logger.warn(`[account-hub] 自动路由运行时刷新失败（配置已写入，运行时下一轮自愈）：${String(error)}`)
           }
         }
-        // ★ 触发点 ③（保存配置，设计稿 §3.8）：用户刚改完候选列表/伪装开关，配置**已经
-        // 写成功**，此刻立刻按新配置维持一次补丁 —— 否则「关掉伪装」要等最长 5 分钟
-        // （触发点 ④）才自动还原，那段时间里出站请求仍带着伪装头，用户看到的是「关了
-        // 没用」。
-        //
-        // ⚠️ **fire-and-forget 且自吞异常**，与上面那条通知同款：配置写入是本调用的
-        // 正事，已经成功了；维持失败绝不能让它变成「保存失败」（用户会再点一次保存，
-        // 而配置其实早就对了）。`runMasqueradePassQuietly` 内部已收敛全部异常。
-        runMasqueradePassQuietly(masqueradeDeps)
+        // ⚠️ 伪装**没有**对应的「写入后立刻生效」动作：运输层每次都按当前配置现读
+        // `autoRoute.masquerade`（见 `src/auto-route.ts` 的载荷构造），配置一改下一轮
+        // 请求即用新值。旧设计那套「保存后立刻维持一次补丁，否则要等 5 分钟定时器」
+        // 的时序问题随磁盘补丁引擎一起消失了。
         const value: RpcAutoRouteSetResponse = {
           enabled: written.enabled,
           models: written.models,
@@ -3454,42 +3269,29 @@ function registerAccountHubEndpoints(options: AccountHubRpcOptions): void {
         }
       }
 
-      // 查询**客户端伪装补丁**当前状态（设计稿 §5.3 第一行）。
+      // 查询**客户端伪装运输层**是否可用（设计稿 §5.3 第一行；语义已随旧补丁引擎退役改写）。
       //
-      // 两件事在同一次调用里做，顺序**不可交换**：
-      //  1. 先跑一次维持（`runMasqueradePassQuietly`）—— 面板打开即「维持」，这是设计稿
-      //     §3.8 触发点 ② 的落地形态：面板挂载时发的正是这条，故不必新增 UI 调用；
-      //  2. 再巡检文件、收敛成响应（`masqueradeValueOf`）—— `applied` 答的是「此刻在不在场」，
-      //     必须在维持**之后**读，否则会把「本次刚打成」报成 `applied: false`。
+      // ⚠️ 这里**不再巡检任何文件**：伪装现在是运输层
+      // （`src/account-hub-masquerade-transport.ts`）在请求出网前就地改写请求头，没有
+      // 「打没打上」这种可失败状态。本方法只剩**可用性声明**，答案恒为可用。
       //
       // ⚠️ **永不抛错**（与 `autoroute.model-info` 同款契约）：本方法存在的意义就是让面板
       // 区分「功能不可用」与「功能坏了」，抛错会被客户端统一显示成「加载失败」，恰好抹掉
-      // 这个区分。故整段无 `throw`，异常一律收敛进 `reason`。
+      // 这个区分。故这里连 `try` 都不需要 —— 响应是一个冻结常量，构造不出异常。
       case 'masquerade.status': {
-        const pass = runMasqueradePassQuietly(masqueradeDeps)
-        const value: RpcMasqueradeResponse = masqueradeValueOf(masqueradeLookup, pass)
-        return { ok: true, value }
+        return { ok: true, value: MASQUERADE_TRANSPORT_STATUS }
       }
 
-      // 显式**应用一次**客户端伪装补丁（设计稿 §5.3 第二行）。
+      // 显式**应用一次**伪装（设计稿 §5.3 第二行）。
       //
-      // 与 `masquerade.status` 的唯一差别是**纪律相反**：status 永不抛错，这里**失败必须抛**
-      // —— 调用方（卡片 3 的重试按钮 / 自动化脚本）要的是「成了没有」的确切答案，把失败
-      // 吞成 `{available: true, applied: false}` 会让调用方以为「等下次维持就好」，而实际
-      // 原因可能是版本漂移（再等也不会自己好）。抛出的中文原因经端点层转成 RPC 错误原文透出。
+      // 运输层**随模块加载**：能走到这个 case 就说明它已经在位，没有任何需要「应用」的动作，
+      // 故这里**刻意是空操作**，响应与 `masquerade.status` 逐字节相同（§5.3 两个方法出参
+      // 一致，调用方可以互换解析）。
       //
-      // **幂等**：维持判据链自带「已在场且版本一致 ⇒ `alreadyPatched`，不重写」，故重复调用
-      // 不会反复改文件（P4）。目标包不存在 ⇒ 抛「未安装外部 provider 适配器」（不是静默
-      // `available: false`）—— 这正是「显式应用」与「查询状态」该有的区别。
+      // ⚠️ **保留这个方法而不是删掉**：它是设计稿 §5.3 的公开契约，外部脚本/自动化可能仍在
+      // 调用；删掉会让调用方拿到「未知方法」错误并据此认为功能坏了，而真相是「不需要做任何事」。
       case 'masquerade.apply': {
-        const pass = runMasqueradePassQuietly(masqueradeDeps)
-        if (pass === undefined) throw new Error(MASQUERADE_STATUS_FAILED_REASON)
-        if (pass.status === 'unavailable') throw new Error(MASQUERADE_UNAVAILABLE_REASON)
-        if (pass.status === 'failed') throw new Error(pass.reason ?? MASQUERADE_STATUS_FAILED_REASON)
-        // 维持已成功（`patched` / `alreadyPatched` / `idle` / `reverted`）：再巡检一次给出
-        // 与 status **完全相同**的响应形状（§5.3 两个方法出参一致，调用方可以互换解析）。
-        const value: RpcMasqueradeResponse = masqueradeValueOf(masqueradeLookup, pass)
-        return { ok: true, value }
+        return { ok: true, value: MASQUERADE_TRANSPORT_STATUS }
       }
 
       // 打开/关闭某个模型。写入后**不重建适配器**：适配器的 listModels 每次

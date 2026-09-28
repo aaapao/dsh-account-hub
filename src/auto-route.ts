@@ -164,9 +164,10 @@ export function autoRouteExhaustedMessage(name: string): string {
  *
  * `userAgent` / `originator` / `masquerade` 也算**影响出站行为**的字段：它们改的是这条
  * 候选发出去的请求头，改了就必须重建（否则用户在面板里改了 UA / Originator、请求却仍
- * 按旧值发，且没有任何提示）。`masquerade` 还多一层：它决定**宿主适配器产物里那份补丁
- * 该不该打**（`src/masquerade-patch.ts` 的 `masqueradeConfigured`），漏进指纹会让
- * 「改了伪装配置 ⇒ 队列不重建」与「补丁状态与配置不一致」同时发生。
+ * 按旧值发，且没有任何提示）。`masquerade` 也一样：它决定的 `x-codex-window-id` 由
+ * 运输层（`src/account-hub-masquerade-transport.ts`）在出网前逐请求就地写入，而运输层
+ * 读的正是**转发时挂在该候选上的载体**，漏进指纹会让「改了伪装配置 ⇒ 队列不重建 ⇒
+ * 仍在发旧 windowId」且没有任何提示。
  *
  * ## 为什么用 `JSON.stringify`
  *
@@ -333,10 +334,10 @@ export interface AutoRouteEntry {
   /**
    * 客户端伪装；**缺省 = 关闭伪装**（`masquerade` 键**缺席**即关闭，没有 `enabled` 布尔）。
    *
-   * 与 `userAgent` / `originator` 同级（一条候选 = 一次具体出站请求），但**语义不同**：
-   * 那两个字段是**宿主适配器出站时**读的请求头取值；本字段是**宿主适配器产物里那份
-   * 补丁该不该打**的判据（`src/masquerade-patch.ts` 的 `masqueradeConfigured` 结构性
-   * 读的就是这里），补丁再把 `windowId` 写成 `x-codex-window-id`。
+   * 与 `userAgent` / `originator` 同级（一条候选 = 一次具体出站请求），也都是出站请求头
+   * 的取值来源：前两者由适配器在构造请求时直接取用，本字段则由运输层
+   * （`src/account-hub-masquerade-transport.ts`）在请求出网前把 `windowId` 写成
+   * `x-codex-window-id`。
    *
    * 故它是**两层接线**：配置层（本文件）与出站层（`accountHubMasquerade` 载体字段，
    * 见 `src/auto-route-adapter.ts` 的 `forwardOptions`）。两层缺一都会「配了却没生效
@@ -377,11 +378,10 @@ export interface AutoRouteMasquerade {
  *
  * 另两条通道各有一个模块（`src/account-hub-user-agent.ts` /
  * `src/account-hub-originator.ts`），因为它们的取值是**宿主侧要发的 HTTP 头**，
- * 需要 `applyAccountHub*` 这样的写入函数与一份共用的合法性判据。伪装没有对应的
- * 宿主侧写入函数 —— 写头的那段代码是**注入到宿主适配器产物里的裸函数**
- * （`src/masquerade-patch.ts` 的 `INJECTED_FUNCTION_SOURCE`），它**不能** import
- * 本插件模块（那是个 rollup 产物，插 import 会破坏打包假设），故只能按
- * `masquerade.windowId` **结构性读取**。
+ * 需要 `applyAccountHub*` 这样的写入函数与一份共用的合法性判据。伪装也没有对应的宿主
+ * 侧写入函数 —— 它由运输层（`src/account-hub-masquerade-transport.ts`）在请求出网前
+ * 就地改写请求头，读的是 `masquerade.windowId` 这个**结构化取值**，而非本插件模块的
+ * 导出（故本类型不参与那条路径，只负责让配置形状有个名字）。
  *
  * 于是本类型的唯一价值是「让载体形状与 {@link AutoRouteMasquerade} 在类型上**同源**
  * 而不是各写一份」：两者必须逐字节一致（一个决定配置怎么存、一个决定请求怎么发），
@@ -450,8 +450,8 @@ function readText(raw: unknown): string | null {
  *
  * 它是一个**命名枚举载体**（设计稿 §4.4 / §13 分叉 e）：v1 只有 `windowId`，将来若要
  * 加字段，裸字符串形态就得做一次类型迁移。且它与出站载体 `accountHubMasquerade` 的
- * 形状**必须逐字一致**（`src/masquerade-patch.ts` 注入的裸函数按 `masquerade.windowId`
- * 结构性读取），裸字符串会让两层形状分叉。
+ * 形状**必须逐字一致**（运输层按 `masquerade.windowId` 结构性读取，见
+ * `src/account-hub-masquerade-transport.ts`），裸字符串会让两层形状分叉。
  *
  * ## 为什么未知键要拒绝，而不是忽略
  *

@@ -33,16 +33,44 @@
  * 透传过任何非终止 chunk，后续失败一律**透传**，交由官方重试在**新一轮**请求上
  * 从新队首继续。
  *
+ * ## 伪装运输层：只包「消费」，且只在真有载荷时才包
+ *
+ * 转发出去的流由 `account-hub-masquerade-transport` 的 `fetch` 包装器负责把三个头写到
+ * 真实请求上，而它读的是 `AsyncLocalStorage` 里的当前载荷。本文件负责**把载荷放进去**，
+ * 纪律有两条，都不是风格问题：
+ *
+ * 1. **ALS 必须包「消费」而不是「创建」**：`this.options.ctx.llm.stream(forwarded)`
+ *    只是造了个异步生成器对象，一个字节都还没跑；生成器的函数体是在**恢复它的那次
+ *    `.next()`** 的上下文里执行的。故上下文必须加在 `for await` 这一侧（见
+ *    {@link withMasqueradeAsyncIterable} 对三个迭代方法的处理），加在创建点等于什么都没包
+ *    —— 且不会报任何错，只会「伪装整段静默失效」。
+ * 2. **默认路径一个字节都不动**：载荷为 `undefined`（三个字段归一后全空）时既不装
+ *    `fetch` 包装器、也不套 ALS 代理，`consumed` 就是内层流本身。包装器即使在零载荷时
+ *    只是纯转发，装它也会改变**所有**出站请求的调用栈形态，而 `globalThis.fetch` 是
+ *    全进程共享的 —— 别的插件也看得见。
+ *
+ * 载荷与 `forwarded` 上那三个载体字段（`accountHubUserAgent` / `accountHubOriginator` /
+ * `accountHubMasquerade`）**必须同源**：都由同一条 entry 现算，见
+ * {@link masqueradePayloadOf}。
+ *
  * @module dsh-account-hub/auto-route-adapter
  */
 
 import type { Context } from '@deepseek-ai/cordis'
 import { EMPTY_RESPONSE_CODE, LlmAdapter, LlmError, ReasoningEffortId, resolveRetryPolicy } from '@deepseek-ai/dsh-llm'
-// 只取类型：两条头覆写通道的形状（字段本体由 forwardOptions 写入、由内层适配器读取，
-// 见 `src/account-hub-user-agent.ts` 与 `src/account-hub-originator.ts`）。
-// import type 不进运行时依赖。
-import type { AccountHubOriginatorCarrier } from './account-hub-originator.js'
-import type { AccountHubUserAgentCarrier } from './account-hub-user-agent.js'
+// 两条头覆写通道 + windowId 通道：既要它们的**类型**（形状，字段本体由 forwardOptions
+// 写入、由内层适配器读取），也要它们的**归一化函数** —— 伪装载荷与转发载体必须同源，
+// 而「值是否合法」的唯一判据在那三个模块里（见 `masqueradePayloadOf`）。
+import { normalizeAccountHubOriginator, type AccountHubOriginatorCarrier } from './account-hub-originator.js'
+import { normalizeAccountHubUserAgent, type AccountHubUserAgentCarrier } from './account-hub-user-agent.js'
+import { normalizeAccountHubWindowId } from './account-hub-window-id.js'
+// 伪装**运输层**：`ensureMasqueradeFetch` 装出站包装器（幂等），
+// `withMasqueradeAsyncIterable` 把「消费一路流」整段放进载荷上下文里。
+import {
+  ensureMasqueradeFetch,
+  withMasqueradeAsyncIterable,
+  type MasqueradePayload,
+} from './account-hub-masquerade-transport.js'
 import type {
   AdapterRegistrationHandle,
   GenerateOptions,
@@ -307,8 +335,27 @@ export class AutoRouteAdapter extends LlmAdapter {
       // 队首为 null = 该定义没有任何候选（未经 sanitize 的手工定义才会出现）。
       if (entry === null) break
       const forwarded = forwardOptions(options, entry)
+      // 伪装运输层：载荷**与 forwarded 上那三个载体字段同源** —— 都由这一条 entry
+      // 归一化而来（三者全空 ⇒ `undefined` ⇒ 整条伪装路径不走，见
+      // {@link masqueradePayloadOf}）。
+      const masquerade = masqueradePayloadOf(entry)
+      // ⚠️ **只有真要伪装时才装包装器**：默认路径下 `globalThis.fetch` 必须与加本功能
+      // 之前是**同一个对象**（哪怕包装器在零载荷时只是纯转发，装上它就改变了所有出站
+      // 请求的调用栈形态，别的插件也看得见）。
+      if (masquerade !== undefined) ensureMasqueradeFetch()
       let emitted = false
-      for await (const chunk of this.options.ctx.llm.stream(forwarded)) {
+      const upstream = this.options.ctx.llm.stream(forwarded)
+      // ⚠️ **ALS 必须包「消费」而不是「创建」**：async generator 的函数体是在恢复它的
+      // 那次 `.next()` 的上下文里执行的 —— `upstream` 这一句只是造了个生成器对象，
+      // 一个字节都还没跑，把载荷上下文加在创建点上等于什么都没包。只有让 `for await`
+      // 的每一次 `.next()` 都进上下文，内层适配器**真正发请求那一刻**才看得见载荷。
+      //
+      // 三条迭代方法都要包（`return()` 负责提前退出时的收尾逻辑，那条路上一样可能发
+      // 请求）—— 那是 `withMasqueradeAsyncIterable` 的职责，这里只把它套在对的位置。
+      const consumed = masquerade === undefined
+        ? upstream
+        : withMasqueradeAsyncIterable(masquerade, upstream)
+      for await (const chunk of consumed) {
         if (chunk.type !== 'finish') {
           // ⚠️ 任何非终止 chunk 都算「已透传」（含 `usage` 与 `block-start`），
           // 判据刻意比「已出字」更严：见模块头对宿主流语法的说明。
@@ -400,15 +447,21 @@ export class AutoRouteAdapter extends LlmAdapter {
  *   且没有任何报错）。
  * - `accountHubMasquerade`：第三条内部通道
  *   （{@link AccountHubMasqueradeCarrier.accountHubMasquerade}），缺省同样一个键都
- *   不挂。它与前两条的**归属不同**：UA / Originator 的取值直接来自条目上的同名字段，
- *   而本字段的来源是 `entry.masquerade`（一个对象）—— 条目上那份配置决定「宿主适配器
- *   产物里那份补丁该不该打」（`src/masquerade-patch.ts` 的 `masqueradeConfigured`），
- *   而**这里**这一行决定「打上补丁后，那次请求到底带不带 `x-codex-window-id`」。两层
- *   缺一都会「配了却没生效且无报错」，故必须同时存在。
+ *   不挂。它与前两条的**归属相同、消费点不同**：三者都取自**同一条** entry（前两条取
+ *   条目上的同名字段，本字段取 `entry.masquerade` 这个对象），但 UA / Originator 由
+ *   内层适配器自己的 `send()` 读（七个适配器的 `applyAccountHub*` 调用），而本字段
+ *   **在出站路径上没有内层消费者** —— `x-codex-window-id` 由运输层落地：
+ *   {@link masqueradePayloadOf} 从同一条 entry 现算载荷，`fetch` 包装器在出网前把它
+ *   写进这次请求自己的头。
+ *
+ *   于是同一次出站请求的身份有**两条到达路径**：载体字段（内层 `send()` 读）与运输层
+ *   载荷（`fetch` 包装器读）。两者**必须同源**，都由这一条 entry 归一化而来；分叉等于
+ *   同一次请求有两个身份，而上游只看到一个 —— 症状是「面板里配的值」与「实际发出的
+ *   值」对不上，且没有任何报错。两层缺一都会「配了却没生效且无报错」，故都必须留。
  *
  *   形态**逐字一致**：条目上的 `masquerade` 与这里的 `accountHubMasquerade` 都是
- *   `{ windowId }`（内层注入的裸函数按 `masquerade.windowId` 结构性读取，且它无法
- *   import 本插件模块，形状分叉不会有任何编译期报错）。
+ *   `{ windowId }`，且载体形状**直接引用** `AutoRouteMasquerade`（见
+ *   {@link AccountHubMasqueradeCarrier}）—— 形状一旦分叉不会有任何编译期报错。
  */
 function forwardOptions(options: GenerateOptions, entry: AutoRouteEntry): GenerateOptions {
   return {
@@ -420,6 +473,50 @@ function forwardOptions(options: GenerateOptions, entry: AutoRouteEntry): Genera
     ...entry.userAgent === undefined ? {} : { accountHubUserAgent: entry.userAgent },
     ...entry.originator === undefined ? {} : { accountHubOriginator: entry.originator },
     ...entry.masquerade === undefined ? {} : { accountHubMasquerade: entry.masquerade },
+  }
+}
+
+/**
+ * 从**同一条**候选条目归一出这次出站的伪装载荷。
+ *
+ * ## 为什么必须与 {@link forwardOptions} 同源
+ *
+ * 同一次出站请求的身份现在有**两条**到达路径：三个载体字段（内层适配器自己的
+ * `send()` 读，见 {@link AccountHubUserAgentCarrier} 等）与这里这份载荷（供
+ * `account-hub-masquerade-transport` 的 `fetch` 包装器在出网前读）。两条路径分叉
+ * 就等于同一次请求有两个身份，而上游只会看到一个 —— 排查时「面板里配的值」与
+ * 「实际发出的值」对不上，且没有任何报错。故载荷只能由 **entry 这一份数据**现算，
+ * 不得另立真相源，也不得从 `forwarded` 里回读（那是本函数的产物，回读会把
+ * 「谁先谁后」变成隐式约束）。
+ *
+ * ## 三个字段全都取归一化结果，且**共用**那三个模块的判据
+ *
+ * `normalize*` 已经保证「脏值一律当没有、绝不抛错」（配置面到出站面隔着 RPC
+ * 反序列化，那里抛错等于把一次配置笔误升级成请求失败）。这里**不再抄一份校验** ——
+ * 三处判据一旦分叉，就会出现「配置面接受、出站面拒绝」这类只在特定输入下现形的缺口。
+ *
+ * ## 三者全空 ⇒ `undefined`（= 整条伪装路径不走）
+ *
+ * 这是**默认路径逐字节不变**的判据所在：绝大多数条目三个字段都没配，此时本函数
+ * 返回 `undefined`，调用方既不装 `fetch` 包装器、也不套 ALS 代理，出站形态与本功能
+ * 存在之前完全一致。⚠️ 判据刻意是「归一化后是否**至少有一个**字段」，而不是
+ * 「`entry.masquerade` 在不在」—— UA / Originator 单配（没配 windowId）同样是要
+ * 伪装的请求，漏掉它们会让那两条既有通道在包装器眼里「没有载荷」，从而在内层
+ * 适配器不经过 `send()` 的那些出站路径上掉身份。
+ *
+ * @returns 至少一个字段可用时的载荷；三者都不可用时 `undefined`。
+ */
+function masqueradePayloadOf(entry: AutoRouteEntry): MasqueradePayload | undefined {
+  const userAgent = normalizeAccountHubUserAgent(entry.userAgent)
+  const originator = normalizeAccountHubOriginator(entry.originator)
+  const windowId = normalizeAccountHubWindowId(entry.masquerade?.windowId)
+  if (userAgent === undefined && originator === undefined && windowId === undefined) return undefined
+  // 缺省一个键都不挂（与 {@link forwardOptions} 的载体写法逐字同款）：落一个
+  // `undefined` 键会让「载荷有三个字段」与「载荷有一个字段」在下游判别时混同。
+  return {
+    ...userAgent === undefined ? {} : { userAgent },
+    ...originator === undefined ? {} : { originator },
+    ...windowId === undefined ? {} : { windowId },
   }
 }
 

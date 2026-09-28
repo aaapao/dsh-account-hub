@@ -4,7 +4,7 @@
  *
  * ## 本文件守什么
  *
- * 伪装功能横跨**四层**，每层都能独立静默失效，且失效时的表现完全相同 ——
+ * 伪装功能横跨**三层**，每层都能独立静默失效，且失效时的表现完全相同 ——
  * 「用户在面板里配了伪装、界面显示保存成功，出站请求却什么都没变，且没有任何报错」：
  *
  * 1. **配置层形状判据**（`src/auto-route.ts`）：`sanitizeAutoRouteConfig` / `readEntry`
@@ -15,36 +15,22 @@
  *    `masquerade` 必须变成 options 上的 `accountHubMasquerade` 才能穿过
  *    `ctx.llm.stream()` 到达内层适配器；**缺省时一个键都不挂**（Z2：与加这条通道之前
  *    逐字节一致）。
- * 3. **补丁维持层**（`src/masquerade-patch.ts`，卡片 1 已测）—— 本文件只测 RPC 怎么调它。
- * 4. **RPC 层两个方法**（`src/account-hub-rpc.ts`）：`masquerade.status` **永不抛错**、
- *    `masquerade.apply` **失败必须抛**；以及两个触发点（面板打开 / 保存配置）的
- *    fire-and-forget 纪律。
+ * 3. **RPC 层两个方法**（`src/account-hub-rpc.ts`）：伪装由运输层
+ *    （`src/account-hub-masquerade-transport.ts`）在请求出网前就地改写请求头实现，
+ *    它随插件进程装载，**没有「打没打上」这种可失败状态** —— 故两个方法都只答
+ *    「运输层在不在」，回的是同一份常量可用性。
  *
- * ## 为什么用真夹具而不是 mock 掉文件系统
+ * ## 为什么不再有磁盘夹具
  *
- * 「打上了没有」这个判据的真相在**磁盘上的那个文件**里。若把 `resolvePatchedTarget` /
- * `inspectPatch` mock 掉，本文件就只剩「我 mock 的返回值被我读到了」——
- * 恰好绕开了唯一会出错的那一段。故这里沿用 `masquerade-patch.spec.ts` 的临时目录夹具
- * （`os.tmpdir()`），把 `masqueradeLookup` 指过去，**绝不触碰真实的 `~/.dsh`**。
+ * 旧实现（`src/masquerade-patch.ts`）会**真的改宿主磁盘文件**，故那时的判据只能在临时
+ * 目录夹具上验证。那套引擎整体退役的原因正是它的目标解析在 installation-first 的宿主里
+ * 永远打不中真文件（patch 从没离开过本机），本文件随之不再需要任何文件系统夹具：
+ * 剩下的被测面全是**纯形状判据**与**常量响应**，不碰盘、不留痕。
  */
 
-import {
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import { AccountPool } from '../../src/account-pool.js'
 import { registerAccountHubRpc } from '../../src/account-hub-rpc.js'
-import {
-  MASQUERADE_TARGET_PACKAGE,
-  applyPatch,
-  type MasqueradeTargetLookup,
-} from '../../src/masquerade-patch.js'
 import {
   autoRouteConfigFacts,
   autoRouteMasqueradeProblem,
@@ -52,77 +38,6 @@ import {
   assertValidAutoRouteConfig,
   type AutoRouteDefinition,
 } from '../../src/auto-route.js'
-
-// ──────────────────────────── 夹具 ────────────────────────────
-
-/** 段 1 的原厂调用点字面量（**独立重写**：锚点漂了要让本文件红，而不是跟着实现漂）。 */
-const ANCHOR = '\t\t\t\t\theaders: requestHeaders(profile.headers)'
-
-/** 目标包版本（夹具里写死的版本号）。 */
-const FIXTURE_VERSION = '0.1.7-rc.1'
-
-/** 原厂 fixture（结构与真机产物同形到「锚点唯一命中」这一层）。 */
-function stockFixture(): string {
-  return [
-    'function requestHeaders(headers) {',
-    '  return { ...(headers ?? {}) };',
-    '}',
-    'function streamWithSnapshot(profile, options) {',
-    '  return {',
-    '\t\t\t\t\ttemperature: options.temperature,',
-    ANCHOR,
-    '  };',
-    '}',
-    'export { requestHeaders, streamWithSnapshot };',
-    '',
-  ].join('\n')
-}
-
-/** 一个临时 profile：目标文件落在**共享层**候选路径上。 */
-interface Fixture {
-  /** 假 dsh home（`dshHomePath(...segs)` 的基准目录）。 */
-  readonly home: string
-  /** 目标文件绝对路径。 */
-  readonly file: string
-}
-
-const created: string[] = []
-
-/** 造夹具（`content` 缺省 = 原厂形态）。 */
-function makeFixture(content: string = stockFixture()): Fixture {
-  const home = mkdtempSync(join(tmpdir(), 'dshcm-route-'))
-  created.push(home)
-  const packageDir = join(home, 'profiles', 'node_modules', ...MASQUERADE_TARGET_PACKAGE.split('/'))
-  const file = join(packageDir, 'lib', 'index.js')
-  mkdirSync(join(packageDir, 'lib'), { recursive: true })
-  writeFileSync(
-    join(packageDir, 'package.json'),
-    JSON.stringify({ name: MASQUERADE_TARGET_PACKAGE, version: FIXTURE_VERSION, type: 'module' }, null, 2),
-    'utf8',
-  )
-  writeFileSync(file, content, 'utf8')
-  return { home, file }
-}
-
-/** 夹具的 lookup（只给共享层来源；profile 层留空，避免碰到真实安装目录）。 */
-function lookupOf(home: string): MasqueradeTargetLookup {
-  return { dshHomePath: (...segments: string[]) => join(home, ...segments) }
-}
-
-/** 目标文件文本。 */
-function textOf(file: string): string {
-  return readFileSync(file, 'utf8')
-}
-
-afterEach(() => {
-  for (const dir of created.splice(0)) {
-    try {
-      rmSync(dir, { recursive: true, force: true, maxRetries: 3 })
-    } catch {
-      // 用例失败时也不留垃圾：删不掉就算了（临时目录由系统回收）。
-    }
-  }
-})
 
 // ──────────────────────────── 1. 配置层形状判据 ────────────────────────────
 
@@ -310,18 +225,16 @@ const MASQUERADE_DEFINITION: AutoRouteDefinition = {
 }
 
 interface HarnessOptions {
-  /** 假 dsh home（伪装补丁目标的基准目录）；不给 = 不给任何目标来源（`unavailable`）。 */
-  home?: string
   /** 预置进持久层文档的 `autoRoute` 原值。 */
   autoRoute?: unknown
 }
 
 /**
- * RPC 测试台：storage 替身 + settings 替身 + connection 替身 + 可选的伪装夹具 lookup。
+ * RPC 测试台：storage 替身 + settings 替身 + connection 替身。
  *
  * 形态照抄 `auto-route-rpc.spec.ts` 的 `makeHarness`（同一套 mock 约定，不另立一套）。
- * 新增的只有 `masqueradeLookup`：它是本卡片为「伪装会真的改磁盘文件」这件事留的口子，
- * 不指向临时夹具就会去动开发机上真实存在的适配器产物。
+ * ⚠️ 伪装那一面**不再需要任何文件系统口子**：运输层的可用性是常量响应，没有可注入的
+ * 目标来源（旧引擎的 `masqueradeLookup` 随它一并退役）。
  */
 function makeHarness(options: HarnessOptions = {}) {
   const warnings: string[] = []
@@ -399,7 +312,6 @@ function makeHarness(options: HarnessOptions = {}) {
     registerAccountHubRpc({
       ctx: ctx as never, pool, codearts: {} as never, buddyCn: {} as never, buddy: {} as never,
       lobsterai: {} as never, traeCn: {} as never, qoder: {} as never, qoderCn: {} as never,
-      ...options.home === undefined ? {} : { masqueradeLookup: lookupOf(options.home) },
     })
   }
 
@@ -430,215 +342,114 @@ async function setup(options: HarnessOptions = {}) {
   return { h, pool }
 }
 
-/** `masquerade.status` 的响应形状（避免在每个用例里重复断言）。 */
-interface StatusValue {
+/** `masquerade.status` / `masquerade.apply` 的响应形状。 */
+interface TransportStatusValue {
   available: boolean
-  applied: boolean
-  reason?: string
-  targetVersion?: string
+  transport?: string
 }
 
-describe('masquerade.status：永不抛错，把「不可用」与「未打补丁」分开', () => {
-  it('目标包不存在（无任何来源）→ available:false + 固定中文原因，且**不抛错**', async () => {
+describe('masquerade.status：运输层可用性（恒真常量，永不抛错）', () => {
+  it('回 { available:true, transport:"als-fetch" }，且**只有这两个键**', async () => {
     const { h } = await setup()
     const result = await h.call('masquerade.status', {})
     expect(result.ok, '查询类方法必须回 ok:true：抛错会被面板显示成「加载失败」').toBe(true)
-    const value = result.value as StatusValue
-    expect(value.available).toBe(false)
-    expect(value.applied).toBe(false)
-    // ⚠️ 这句话必须与面板常量 `AUTO_ROUTE_MASQUERADE_UNAVAILABLE` 逐字同句。
-    expect(value.reason).toBe('当前环境未安装外部 provider 适配器')
-    // 不可用时不该编造版本号。
-    expect('targetVersion' in value).toBe(false)
-  })
-
-  it('目标包在场但未配置伪装 → available:true / applied:false（未打补丁）', async () => {
-    const fixture = makeFixture()
-    const { h } = await setup({ home: fixture.home })
-    const result = await h.call('masquerade.status', {})
-    const value = result.value as StatusValue
+    const value = result.value as TransportStatusValue
     expect(value.available).toBe(true)
-    expect(value.applied, '未配置伪装 ⇒ 补丁不该在场').toBe(false)
-    expect(value.targetVersion).toBe(FIXTURE_VERSION)
-    // 未打补丁**不是错误**：不该带 reason（那是给「打不上」用的）。
-    expect('reason' in value).toBe(false)
-    // 零配置自动还原：维持跑过之后文件仍是原厂形态。
-    expect(textOf(fixture.file)).toBe(stockFixture())
+    expect(value.transport).toBe('als-fetch')
+    // 旧形状的 `applied` / `reason` / `targetVersion` 随磁盘补丁引擎一并作废：它们答的是
+    // 「文件打没打上」，而运输层根本没有可失败状态。留着会让面板又去分流一个不存在的档。
+    expect(Object.keys(value).sort()).toEqual(['available', 'transport'])
   })
 
-  it('配置了伪装 → 维持把补丁打上，status 报 applied:true（且 idempotent：文件不被反复重写）', async () => {
-    const fixture = makeFixture()
+  it('**与配置无关**：没有任何候选、甚至没有 autoRoute 文档时结论也不变', async () => {
+    // 运输层是否在场是**进程级事实**，不取决于用户配了什么。这条钉住「别再把它接回配置」。
+    const { h } = await setup()
+    const empty = await h.call('masquerade.status', {})
+    expect((empty.value as TransportStatusValue).available).toBe(true)
+  })
+
+  it('配置了伪装时结论**逐字节相同**（该方法不再读配置）', async () => {
     const { h } = await setup({
-      home: fixture.home,
       autoRoute: { enabled: true, models: [MASQUERADE_DEFINITION] },
     })
     const first = await h.call('masquerade.status', {})
-    const firstValue = first.value as StatusValue
-    expect(firstValue.available).toBe(true)
-    expect(firstValue.applied, '配置里有伪装块 ⇒ 维持应当把补丁打上').toBe(true)
-    const patched = textOf(fixture.file)
-    // 幂等：再查一次，文件逐字节不变（判据链「已在场且版本一致 ⇒ 不重写」）。
     const second = await h.call('masquerade.status', {})
-    expect((second.value as StatusValue).applied).toBe(true)
-    expect(textOf(fixture.file), '重复查询不得反复重写目标文件').toBe(patched)
+    expect(second.value).toEqual(first.value)
+    expect((first.value as TransportStatusValue).available).toBe(true)
   })
 
-  it('目标文件不可读（目录占位）→ 仍回 ok:true，不抛错', async () => {
-    const fixture = makeFixture()
-    // 用一个目录替换掉目标文件：`inspectPatch` 的 readFileSync 会抛 EISDIR。
-    rmSync(fixture.file, { force: true })
-    mkdirSync(fixture.file, { recursive: true })
-    const { h } = await setup({ home: fixture.home })
-    const result = await h.call('masquerade.status', {})
-    expect(result.ok, '读文件失败也必须回 ok:true（否则面板显示「加载失败」）').toBe(true)
-    const value = result.value as StatusValue
-    expect(value.available).toBe(true)
-    expect(value.applied).toBe(false)
-    // 读文件失败这一支的 reason 源头是 `inspectPatch` 的 `describe(error)`，即
-    // `readFileSync` 的**英文 errno 文本**（卡片 1 刻意不翻译它：那个模块不面向界面，
-    // 英文原文对排查更有用）。RPC 层只做**补中文前缀**、绝不改写原文，故这里两条都断言：
-    expect(value.reason, '读文件失败必须把底层原因带给面板，否则用户无迹可循').toBeDefined()
-    expect(value.reason, '面板是中文界面，裸 errno 文本必须以中文前缀起头').toMatch(/^伪装状态查询失败/)
-    expect(value.reason, '中文前缀之外必须原样保留底层 errno 原文（改写它会让排查失去线索）')
-      .toMatch(/EISDIR|directory/i)
-  })
-
-  it('配置未启用（enabled:false）时维持不因伪装块而打补丁（还原分支）', async () => {
-    const fixture = makeFixture()
+  it('连查三次都成功（无状态、无副作用、可反复调用）', async () => {
     const { h } = await setup({
-      home: fixture.home,
-      autoRoute: { enabled: false, models: [MASQUERADE_DEFINITION] },
+      autoRoute: { enabled: true, models: [MASQUERADE_DEFINITION] },
     })
-    const result = await h.call('masquerade.status', {})
-    // `masqueradeConfigured` 只看 entries 上的 windowId（不看总开关），故这里仍是 true：
-    // 这条用例钉住的是「判据来自配置内容本身」，避免将来有人误加 `enabled` 条件。
-    expect((result.value as StatusValue).available).toBe(true)
-    expect((result.value as StatusValue).applied).toBe(true)
+    for (let index = 0; index < 3; index += 1) {
+      const result = await h.call('masquerade.status', {})
+      expect(result.ok, `第 ${index + 1} 次查询必须照样成功`).toBe(true)
+      expect((result.value as TransportStatusValue).transport).toBe('als-fetch')
+    }
   })
 })
 
-describe('masquerade.apply：失败**必须抛**（与 status 纪律相反）', () => {
-  it('目标包不存在 → ok:false，错误原文 = 面板那句「未安装外部 provider 适配器」', async () => {
+describe('masquerade.apply：已退役为无副作用的成功返回（运输层无需施加动作）', () => {
+  it('回 ok:true，且响应与 `masquerade.status` **完全一致**', async () => {
+    const { h } = await setup()
+    const applied = await h.call('masquerade.apply', {})
+    const status = await h.call('masquerade.status', {})
+    expect(applied.ok, '运输层无需任何施加动作 ⇒ 这里不存在失败路径').toBe(true)
+    // ⚠️ 两个方法共用宿主侧同一份常量（`MASQUERADE_TRANSPORT_STATUS`）。若哪天有人把
+    // apply 改成「真的做点什么」，这条断言会先红 —— 而不是让面板拿到两个形状不同的响应。
+    expect(applied.value).toEqual(status.value)
+  })
+
+  it('旧语义的键一个都不留（`applied` / `reason` / `targetVersion` 已随引擎退役）', async () => {
     const { h } = await setup()
     const result = await h.call('masquerade.apply', {})
-    expect(result.ok, '显式应用失败必须让调用方拿到确切答案，不能吞成 applied:false').toBe(false)
-    expect(result.error?.message).toBe('当前环境未安装外部 provider 适配器')
+    const value = result.value as Record<string, unknown>
+    // 留着 `applied` 会诱导面板再去分流一个**运输层里根本没有**的档（「没打上」）。
+    for (const dead of ['applied', 'reason', 'targetVersion']) {
+      expect(dead in value, `旧键 ${dead} 不该再出现在响应里`).toBe(false)
+    }
   })
 
-  it('目标包在场且配置了伪装 → 打上补丁并回与 status 相同的形状', async () => {
-    const fixture = makeFixture()
-    const { h } = await setup({
-      home: fixture.home,
-      autoRoute: { enabled: true, models: [MASQUERADE_DEFINITION] },
-    })
-    const result = await h.call('masquerade.apply', {})
-    expect(result.ok).toBe(true)
-    const value = result.value as StatusValue
-    expect(value.available).toBe(true)
-    expect(value.applied).toBe(true)
-    expect(textOf(fixture.file)).toContain('__dshAccountHubApplyMasquerade')
-  })
-
-  it('**幂等**：连续两次 apply 都成功，且文件逐字节不变（不重写已在场的补丁）', async () => {
-    const fixture = makeFixture()
-    const { h } = await setup({
-      home: fixture.home,
-      autoRoute: { enabled: true, models: [MASQUERADE_DEFINITION] },
-    })
+  it('**幂等且零副作用**：连调两次都成功，且持久层一字不变', async () => {
+    const { h } = await setup({ autoRoute: { enabled: true, models: [MASQUERADE_DEFINITION] } })
+    const before = JSON.stringify(h.storageCurrent())
     const first = await h.call('masquerade.apply', {})
-    expect(first.ok).toBe(true)
-    const afterFirst = textOf(fixture.file)
     const second = await h.call('masquerade.apply', {})
+    expect(first.ok).toBe(true)
     expect(second.ok).toBe(true)
-    expect(textOf(fixture.file), '已在场且版本一致 ⇒ 判据链必须走 alreadyPatched 而不是重写').toBe(afterFirst)
-  })
-
-  it('版本漂移（锚点零命中）→ 抛错且**文件逐字节不变**', async () => {
-    // 造一个锚点已变的产物：判据链必须在写入前发现零命中并拒绝。
-    const drifted = stockFixture().replace(ANCHOR, '\t\t\t\t\theaders: otherHeaders(profile.headers)')
-    const fixture = makeFixture(drifted)
-    const before = textOf(fixture.file)
-    const { h } = await setup({
-      home: fixture.home,
-      autoRoute: { enabled: true, models: [MASQUERADE_DEFINITION] },
-    })
-    const result = await h.call('masquerade.apply', {})
-    expect(result.ok, '锚点零命中 ⇒ 必须抛错，而不是静默 applied:false').toBe(false)
-    expect(result.error?.message).toMatch(/锚点零命中/)
-    expect(textOf(fixture.file), '宁可功能不可用，也不产生半截补丁').toBe(before)
-  })
-
-  it('未配置伪装 → apply 成功（还原分支是成功路径，不是失败）', async () => {
-    const fixture = makeFixture()
-    const { h } = await setup({ home: fixture.home })
-    const result = await h.call('masquerade.apply', {})
-    expect(result.ok).toBe(true)
-    expect((result.value as StatusValue).applied).toBe(false)
+    // 旧实现会**改宿主磁盘上的适配器产物**；退役后它连持久层都不该碰。
+    expect(JSON.stringify(h.storageCurrent()), 'apply 不该往持久层写任何东西').toBe(before)
+    // 配置里有伪装块与否都不改变结论：运输层照旧只需在场。
+    expect((second.value as TransportStatusValue).available).toBe(true)
   })
 })
 
-// ──────────────────────────── 3. 两个触发点 ────────────────────────────
+// ──────────────────────────── 3. 配置面 ────────────────────────────
 
-describe('触发点 ②③：面板打开（autoroute.get）与保存配置（autoroute.set）各自维持一次', () => {
-  it('触发点 ②：autoroute.get 会把配置里的伪装补丁打上（客户端一行都不用改）', async () => {
-    const fixture = makeFixture()
-    const { h } = await setup({
-      home: fixture.home,
-      autoRoute: { enabled: true, models: [MASQUERADE_DEFINITION] },
-    })
-    // 面板挂载时发的正是这一条：维持必须搭在它上面。
-    const result = await h.call('autoroute.get', {})
-    expect(result.ok).toBe(true)
-    expect(textOf(fixture.file), 'autoroute.get 必须顺带维持一次补丁（触发点 ②）')
-      .toContain('__dshAccountHubApplyMasquerade')
-  })
-
-  it('触发点 ③：autoroute.set 写成功后就地维持（关掉伪装 ⇒ 立刻还原，不等 5 分钟）', async () => {
-    const fixture = makeFixture()
-    const { h } = await setup({ home: fixture.home })
-    // 先经 set 配上伪装：这一次调用本身就该把补丁打上。
-    const on = await h.call('autoroute.set', { enabled: true, models: [MASQUERADE_DEFINITION] })
-    expect(on.ok).toBe(true)
-    expect(textOf(fixture.file), '保存配置后必须立刻维持（触发点 ③）')
-      .toContain('__dshAccountHubApplyMasquerade')
-    // 再经 set 去掉伪装块：这一次调用本身就该还原，而不是等定时器。
-    const stripped: AutoRouteDefinition = {
-      id: 'def-mask',
-      name: 'masked-auto',
-      entries: [{ provider: 'p-a', model: 'a' }],
-    }
-    const off = await h.call('autoroute.set', { models: [stripped] })
-    expect(off.ok).toBe(true)
-    expect(textOf(fixture.file), '关掉伪装必须立刻还原（否则那段时间出站仍带伪装头）')
-      .toBe(stockFixture())
-  })
-
-  it('触发点 ②③ **绝不影响** RPC 结果：目标包损坏时 get/set 照样成功', async () => {
-    const fixture = makeFixture(stockFixture().replace(ANCHOR, '\t\t\t\t\theaders: other(profile.headers)'))
-    const { h } = await setup({
-      home: fixture.home,
-      autoRoute: { enabled: true, models: [MASQUERADE_DEFINITION] },
-    })
-    // 维持会失败（锚点零命中），但它是旁路：只读查询与配置写入都必须照常成功。
-    const read = await h.call('autoroute.get', {})
-    expect(read.ok, '维持失败绝不能把「打开面板」升级成「面板打不开」').toBe(true)
-    expect(read.value).toEqual({ enabled: true, models: [MASQUERADE_DEFINITION] })
-    const written = await h.call('autoroute.set', { enabled: false })
-    expect(written.ok, '维持失败绝不能把「保存成功」显示成「保存失败」').toBe(true)
-    // 失败原因必须留在日志里（否则用户完全无迹可循）。
-    expect(h.warnings.some(message => message.includes('伪装'))).toBe(true)
-  })
-
-  it('触发点 ②③ 与配置面无关：autoroute.set 的返回体仍只有 enabled/models 两个键', async () => {
-    const fixture = makeFixture()
-    const { h } = await setup({ home: fixture.home })
+/**
+ * 旧实现里 `autoroute.get` / `autoroute.set` 各自**顺带触发一次补丁维持**（触发点 ②③）。
+ * 那两个触发点随磁盘引擎一并退役：运输层随插件进程装载，没有任何「配置改了要重新施加」
+ * 的动作可言。本节钉住「退役干净」—— 配置面本身照旧，且不再有维保日志。
+ */
+describe('配置面：伪装配置原样往返，与运输层彻底解耦', () => {
+  it('autoroute.get / set 的返回体仍只有 enabled/models 两个键（响应形状未被污染）', async () => {
+    const { h } = await setup()
     const result = await h.call('autoroute.set', { enabled: true, models: [MASQUERADE_DEFINITION] })
     expect(Object.keys(result.value as object).sort()).toEqual(['enabled', 'models'])
   })
 
+  it('触发点已退役：get/set 都不再留任何「伪装」维保日志', async () => {
+    const { h } = await setup({ autoRoute: { enabled: true, models: [MASQUERADE_DEFINITION] } })
+    // 旧实现里这两条各自会跑一次维持，失败时往 logger 里写中文告警。运输层没有可失败态，
+    // 故这里必须**一条都没有** —— 有的话说明还有旧路径挂在配置读写上。
+    await h.call('autoroute.get', {})
+    await h.call('autoroute.set', { enabled: false })
+    expect(h.warnings.filter(message => message.includes('伪装'))).toEqual([])
+  })
+
   it('伪装配置**原样往返**：set 存进去、get 读回来（含 windowId 逐字保留）', async () => {
-    const fixture = makeFixture()
-    const { h } = await setup({ home: fixture.home })
+    const { h } = await setup()
     const written = await h.call('autoroute.set', { models: [MASQUERADE_DEFINITION] })
     expect(written.ok).toBe(true)
     expect(written.value).toEqual({ enabled: false, models: [MASQUERADE_DEFINITION] })

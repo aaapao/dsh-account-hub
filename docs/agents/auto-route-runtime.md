@@ -58,6 +58,56 @@ provider 侧签名（Anthropic 的 `thinkingSignature` / DeepSeek Messages 的
 `reasoning.signature`），签名一丢，下一轮请求会被上游以 400 拒绝。把
 `source.provider` 改写成目标 provider，归属检查就命中「同一个适配器」，replayState 得以保留。
 
+### 伪装运输层（`accountHubMasquerade` 载体与载荷**同源**）
+
+客户端的三个伪装值（`User-Agent` / `Originator` / `x-codex-window-id`）要落在**这一条候选
+自己的那次请求**上，而它们**不是**由本适配器直接写进请求头的 —— 本适配器只负责**把值送到
+该去的地方**，真正写头的是 `src/account-hub-masquerade-transport.ts` 里的
+`globalThis.fetch` 包装器。四个要点，每一条写错都**不会报错**、只会静默失效：
+
+| # | 要点 | 写错的症状 |
+|---|---|---|
+| 1 | 载荷与 `forwardOptions` 的三个载体字段**同源**：都由 `masqueradePayloadOf(entry)` 从**同一条 entry** 现算 | 同一次请求有两个身份，上游只看到一个 ⇒「面板里配的值」与「实际发出的值」对不上 |
+| 2 | ALS 必须包**消费侧**（`for await` 这一侧），不是创建侧 | 伪装整段静默失效，且不抛任何错 |
+| 3 | `ensureMasqueradeFetch()` **按需安装**：仅当载荷非 `undefined` 时调用 | 默认路径下 `globalThis.fetch` 被换成了包装器（哪怕它只是纯转发） |
+| 4 | `windowId` 取自条目里**已存的值**，运行时**永不轮换** | 同一条候选每次请求换一个身份，上游看到「同一账号反复换客户端」 |
+
+**① 两条到达路径，必须同源。** 出站身份有两条路：载体字段 `accountHubUserAgent` /
+`accountHubOriginator` 由**内层适配器自己的 `send()`** 读走（七个适配器各自的
+`applyAccountHub*` 调用）；而 `accountHubMasquerade` 在出站路径上**没有内层消费者** ——
+`x-codex-window-id` 由运输层落地。所以载荷**只能**由 entry 这一份数据现算，
+**不得从 `forwarded` 里回读**（那是本函数的产物，回读会把「谁先谁后」变成隐式约束），
+也不得另立真相源。
+
+⚠️ 判据是「三字段**归一化后**是否至少有一个」，**不是**「`entry.masquerade` 在不在」：
+只配了 UA（没配 windowId）的条目**同样**是要伪装的请求，按后者判会让那两条既有通道
+在包装器眼里「没有载荷」。
+
+**② ALS 包消费侧 —— 这是本层最容易改错的一处。** `ctx.llm.stream(forwarded)` 只是造了个
+**异步生成器对象**，一个字节都还没跑：async generator 的函数体是在**恢复它的那次
+`.next()`** 的上下文里执行的，不是在它被创建的地方。故把载荷上下文加在创建点上
+**等于什么都没包**，而且**不会报任何错** —— 内层适配器真正 `fetch` 的那一刻
+`currentMasqueradePayload()` 拿到的是 `undefined`，请求照常发出，只是没有伪装。
+
+三个迭代方法**都要**包（`next()` / `return()` / `throw()`）：真实适配器的流在提前退出
+（`break` / 取消）时会走 `return()`，那条路径上的收尾逻辑一样可能发请求（销账、上报），
+掉了载荷就会用错身份。接线形态只有一种，由 `withMasqueradeAsyncIterable(payload, upstream)`
+统一提供 —— **不提供**「绑定创建点」的写法，从 API 形态上堵住这个错法。
+
+**③ 按需安装，默认路径零变化。** `ensureMasqueradeFetch()` 幂等（重复调用不叠层），
+但**绝不是**「装上更保险」：`globalThis.fetch` 是**全进程共享**的，装上以后**所有**走
+`fetch` 的出站请求都要经过这层包装器（包括别的插件的）。零载荷时它只是纯转发
+（`base(input, init)` 原样透传，连 `init` 的字段都不读），但它仍然改变了所有出站请求的
+调用栈形态。故纪律是：**载荷为 `undefined` 时既不装包装器、也不套 ALS 代理**，
+`consumed` 就是内层流本身 —— 默认路径下 `globalThis.fetch` 与加本功能之前是
+**同一个对象**。
+
+**④ `windowId` 是一次生成、此后复用。** 它由客户端在选中预设时生成并随条目持久化
+（拍板决议 c：逐条目、生成一次、此后不变）；运行时**只读不改** —— 每次请求都从
+`entry.masquerade.windowId` 取同一个值。⚠️ **不做任何「按会话 / 按请求轮换」**：那会让
+同一条候选在上游眼里变成不断更换客户端身份的异常账号，正是伪装要避免的事。
+界面上它**完全不可见**（没有输入框、没有按钮、没有提示）。
+
 ---
 
 ## 3. 降级引擎（适配器是唯一调用方）
@@ -345,7 +395,10 @@ provider 侧签名（Anthropic 的 `thinkingSignature` / DeepSeek Messages 的
 
 ## 9. 测试与验证
 
-`tests/unit/auto-route-adapter.spec.ts`（76 例）。**mock 的边界**：`ctx.llm` 用真实
+`tests/unit/auto-route-adapter.spec.ts`（**81 例**；其中伪装接线那几例随运输层落地新增，
+另有独立套件 `tests/unit/masquerade-transport.spec.ts` 30 例 +
+`tests/unit/masquerade-transport-wiring.spec.ts` 15 例，
+详见 `docs/agents/client-masquerade-design.md` §10）。**mock 的边界**：`ctx.llm` 用真实
 `LlmRuntime` ＋ 一个记录型目标适配器 —— 只有这样才能钉住「重入 `ctx.llm.stream()` 真的
 会重新走适配器选择与能力解析」；用替身 mock 掉 `ctx.llm.stream` 等于把被测的那一层也换掉。
 同理聚合模型「不声明档位」由真实运行时的 `resolveCallConfig` 校验（无声明即不物化），

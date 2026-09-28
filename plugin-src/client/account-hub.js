@@ -2385,31 +2385,21 @@ const AUTO_ROUTE_CODEX_ORIGINATOR = 'codex_exec';
 const AUTO_ROUTE_MASQUERADE_PLACEHOLDER = '默认关闭（不伪装）';
 
 /**
- * 伪装补丁**已生效**（`masquerade.status` 的 `available && applied`）时的徽标文案。
+ * 伪装**出站通道已就绪**时的徽标文案。
  *
- * 下方四条与 {@link AUTO_ROUTE_MASQUERADE_PLACEHOLDER} 一起，是设计稿 §5.4 的五个
- * 文案常量；`AUTO_ROUTE_MASQUERADE_UNAVAILABLE` 与宿主侧
- * `src/account-hub-rpc.ts` 的 `MASQUERADE_UNAVAILABLE_REASON` **必须逐字同句**
- * （宿主回这句话、面板照原样显示，两处是同一句字面量的两份拷贝）。
- */
-const AUTO_ROUTE_MASQUERADE_APPLIED = '已生效';
-
-/** 补丁**不在场**且维持未报版本问题的徽标文案（多半是还没有任何条目配置伪装头）。 */
-const AUTO_ROUTE_MASQUERADE_NOT_PATCHED = '未打补丁';
-
-/**
- * 补丁**因目标文件版本漂移而未写入**的徽标文案。
+ * ## 这条徽标答的是什么
  *
- * ⚠️ 它同时是**服务端原因的前缀判据**：`src/masquerade-patch.ts` 在「调用点锚点零命中 /
- * 多次命中」两条判据上抛出的中文原因都以这七个字开头（后接具体命中数与升级指引）。
- * 判据用前缀而不是全等，是因为服务端那句话带可变的目标版本号；而客户端拿不到结构化
- * 的失败分类（`masquerade.status` 只回一个 `reason` 字符串）。服务端若改了那句话的
- * 开头，这里会**退化成**「未打补丁」——只是不够精确，不会报错，也不会把好状态说成坏的。
+ * 答的是「本进程里，伪装到底作用不作用在出站请求上」——**运输可用性**，不是某个文件
+ * 打没打上补丁。伪装由运输层（`src/account-hub-masquerade-transport.ts`）在请求出网前
+ * 就地改写请求头实现，它随插件进程装载，没有「打了没打」「版本对不对」这类可失败态：
+ * 能收到 `masquerade.status` 的响应就说明它在场。
+ *
+ * ⚠️ 正因为恒真，徽标不再承担**分流**职责（没有「不可用 / 未打补丁 / 版本不匹配」三档
+ * 可分了）：它的价值退化成「让用户看见这条通道确实接着」，故只留这一条文案。旧的
+ * 「当前环境未安装外部 provider 适配器」与宿主侧字面量必须逐字同句的耦合一并作废 ——
+ * 那句判据随磁盘补丁引擎整体退役。
  */
-const AUTO_ROUTE_MASQUERADE_VERSION_MISMATCH = '目标文件版本不匹配';
-
-/** 当前 profile **没装外部 provider 适配器**（`available === false`）时的徽标文案。 */
-const AUTO_ROUTE_MASQUERADE_UNAVAILABLE = '当前环境未安装外部 provider 适配器';
+const AUTO_ROUTE_MASQUERADE_READY = '出站伪装已就绪';
 
 /**
  * 从一条候选的**实际字段值**推导「客户端伪装」下拉的当前态（预设名不持久化）。
@@ -2464,27 +2454,22 @@ function newAutoRouteMasqueradeWindowId() {
 /**
  * 把 `masquerade.status` 的响应收敛成行内徽标（`{ tone, text }`）或 `null`。
  *
- * 四档（设计稿 §5.4）：
- * - `available && applied` ⇒ 绿「已生效」；
- * - `available && !applied` 且原因以「目标文件版本不匹配」开头 ⇒ 黄「目标文件版本不匹配」；
- * - `available && !applied` 其余 ⇒ 灰「未打补丁」；
- * - `!available` ⇒ 灰「当前环境未安装外部 provider 适配器」。
+ * ## 只有一档，这是设计而不是偷懒
  *
- * ⚠️ **`status` 未就绪 / 拉取失败 ⇒ 回 `null`（静默不渲染徽标）**：伪装状态是旁路
- * 信息，查不到时既不该编一个结论，也不该让编辑弹窗显示成出错（`masquerade.status`
- * 本身契约上永不抛错，这里是客户端侧的同类纪律）。
+ * 宿主那侧该方法是**常量响应**（`available: true` + `transport: 'als-fetch'`，见
+ * `src/account-hub-rpc.ts` 的 `MASQUERADE_TRANSPORT_STATUS`）：能收到响应就说明运输层
+ * 已随插件进程装载。故这里没有可分的档位，徽标也不再是「分流依据」，而是「这条出站
+ * 通道接着」的可见凭据（用户在编辑弹窗里改伪装字段时能看到自己改的东西有去处）。
+ *
+ * ⚠️ **`available` 不为 `true` ⇒ 回 `null`（静默不渲染）**：在恒真契约下这只可能是
+ * 响应畸形（RPC 通道层的问题），那是通道的故障、不是「伪装不可用」这个业务结论 ——
+ * 按「查不到就不说」处置，绝不把通道故障伪装成一条业务判断。`status` 未就绪 / 拉取
+ * 失败同理（`masquerade.status` 宿主侧永不抛错，这里是客户端侧的同类纪律）。
  */
 function autoRouteMasqueradeBadgeOf(status) {
   if (!status || typeof status !== 'object') return null;
-  if (status.available !== true) {
-    return { tone: 'neutral', text: AUTO_ROUTE_MASQUERADE_UNAVAILABLE };
-  }
-  if (status.applied === true) return { tone: 'success', text: AUTO_ROUTE_MASQUERADE_APPLIED };
-  const reason = typeof status.reason === 'string' ? status.reason : '';
-  if (reason.startsWith(AUTO_ROUTE_MASQUERADE_VERSION_MISMATCH)) {
-    return { tone: 'warning', text: AUTO_ROUTE_MASQUERADE_VERSION_MISMATCH };
-  }
-  return { tone: 'neutral', text: AUTO_ROUTE_MASQUERADE_NOT_PATCHED };
+  if (status.available !== true) return null;
+  return { tone: 'success', text: AUTO_ROUTE_MASQUERADE_READY };
 }
 
 /** 自动模型定义 id 的自增种子（与时间戳一起保证同一次会话内不重复）。 */
@@ -2851,7 +2836,7 @@ function AutoRouteEntryEditor({
        * `setEntryField` 在选预设时生成 / 复用并直接写进条目。
        *
        * ⚠️ 徽标是**旁路信息**（来自 `masquerade.status`），未就绪或查询失败时整块不渲染
-       * ——查不到补丁状态绝不该让编辑弹窗看起来像出错了。
+       * ——查不到出站通道状态绝不该让编辑弹窗看起来像出错了。
        */
       React.createElement('div', { className: 'dim-ah-arEditorMasqueradeRow' },
         React.createElement('span', { className: 'dim-ah-arEditorLabel' }, '客户端伪装'),
@@ -2926,12 +2911,11 @@ function AutoRoutePanel({ rpcCall }) {
    * 刻意只存原样响应、不在这里收敛成徽标文案：收敛逻辑是
    * {@link autoRouteMasqueradeBadgeOf} 的单一职责，面板不替它下结论。也刻意**不存
    * 「loading」态** —— 徽标是旁路信息，未就绪与查询失败在界面上同款（整块不渲染），
-   * 给一个转圈反而把「补丁状态」抬成了面板的主信息。
+   * 给一个转圈反而把「伪装通道状态」抬成了面板的主信息。
    *
-   * ⚠️ 面板级拉取（一次挂载一次），**不是**每次开编辑弹窗拉一次：补丁状态与具体
-   * 候选条目无关，是整台机器的全局事实（目标文件是否已打补丁）。每开一次弹窗就
-   * 打一次 RPC，换不来任何新信息。宿主侧另有 5 分钟维护定时器负责让真实状态收敛
-   * （拍板决议 j），本徽标只呈现「此刻查到的事实」。
+   * ⚠️ 面板级拉取（一次挂载一次），**不是**每次开编辑弹窗拉一次：运输可用性与具体
+   * 候选条目无关，是本进程的全局事实（伪装通道在不在）。每开一次弹窗就打一次 RPC，
+   * 换不来任何新信息 —— 宿主侧那是个常量响应，本徽标只呈现「此刻查到的事实」。
    */
   const [masqueradeStatus, setMasqueradeStatus] = React.useState(null);
   // 待确认删除的定义 id（`Modal` 二键确认，取代原生 confirm）。
@@ -3004,17 +2988,17 @@ function AutoRoutePanel({ rpcCall }) {
   }, [rpcCall]);
 
   /**
-   * 拉一次伪装补丁状态（编辑弹窗「客户端伪装」行的行内徽标读它）。
+   * 拉一次伪装**运输层可用性**（编辑弹窗「客户端伪装」行的行内徽标读它）。
    *
    * ⚠️ **失败必须静默**：与目录 / 档位那两路相反，这里既不进 `saveError` 也不进
    * 任何红色提示行。理由是这条信息的分量不同 —— 目录拉不到会让三个下拉全空（用户
-   * 会得出「没有任何模型可选」这个与真相相反的结论，非说不可），而补丁状态拉不到
+   * 会得出「没有任何模型可选」这个与真相相反的结论，非说不可），而运输可用性拉不到
    * 只是**少一个旁路徽标**：UA / Originator 两格照填照改，配置照存。为它弹一行红字
-   * 等于把「本机没装外部 provider 适配器」这种完全正常的情况报成面板故障。
+   * 等于把一次通道抖动报成面板故障。
    *
-   * 宿主侧 `masquerade.status` 本身**从不抛错**（判不出目标时回 `available:false`
-   * + 原因），故这里的 catch 只兜「RPC 通道本身断了」这一种情形，处置与「未就绪」
-   * 相同：保持 `null`，徽标整块不渲染。
+   * 宿主侧 `masquerade.status` 本身**从不抛错**（回的是常量「运输层在场」，见
+   * `src/account-hub-rpc.ts` 的 `MASQUERADE_TRANSPORT_STATUS`），故这里的 catch 只兜
+   * 「RPC 通道本身断了」这一种情形，处置与「未就绪」相同：保持 `null`，徽标整块不渲染。
    */
   const loadMasqueradeStatus = React.useCallback(async () => {
     try {
@@ -3070,7 +3054,7 @@ function AutoRoutePanel({ rpcCall }) {
     mounted.current = true;
     void loadConfig();
     void loadCatalog();
-    // 伪装补丁状态：与目录同批拉一次（面板级，不是每次开编辑弹窗拉一次）。
+    // 伪装运输层可用性：与目录同批拉一次（面板级，不是每次开编辑弹窗拉一次）。
     void loadMasqueradeStatus();
     return () => { mounted.current = false; };
     // 面板按 version 重挂载（见 AccountHubPage），故这里只需要跑一次。
@@ -3230,8 +3214,9 @@ function AutoRoutePanel({ rpcCall }) {
            */
           if (field === 'masqueradePreset') {
             // 「关闭」= 三样一起清（伪装块 / UA / Originator）。这是本行**唯一**会主动
-            // 抹掉已填值的动作，语义等同把上面两格各自点一次「⟲」再摘掉 windowId
-            // ——服务端据此判「没有任何条目配伪装头」而自动还原补丁（拍板决议 f）。
+            // 抹掉已填值的动作，语义等同把上面两格各自点一次「⟲」再摘掉 windowId。
+            // ⚠️ 清掉即「这条候选不再伪装」：运输层出网前读不到载荷，自然一个伪装头
+            // 都不写（旧实现里那句「据此自动还原磁盘补丁」随补丁引擎一并退役）。
             if (value === AUTO_ROUTE_MASQUERADE_OFF) {
               const cleared = { ...entry };
               delete cleared.userAgent;

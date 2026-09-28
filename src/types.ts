@@ -680,37 +680,37 @@ export interface RpcAutoRouteModelInfoResponse {
 /**
  * RPC: `masquerade.status` / `masquerade.apply` 请求。
  *
- * **无字段**：伪装的目标是「宿主适配器产物里那份补丁」，全进程只有一个候选文件、
- * 也只有一份配置（池里的 `autoRoute`），没有可寻址的参数（设计稿 §5.3）。
+ * **无字段**：伪装参数挂在候选条目上（`autoRoute` 里的 `userAgent` / `originator` /
+ * `masquerade.windowId`），由运输层按「正在驱动的这一路请求」自动取用，没有可寻址的
+ * 参数。
  */
 export type RpcMasqueradeRequest = Record<string, never>
 
 /**
- * RPC: `masquerade.status` / `masquerade.apply` 响应（设计稿 §5.3）。
+ * RPC: `masquerade.status` / `masquerade.apply` 响应。
  *
- * 两个方法的出参形状**完全相同**，差别只在纪律：`status` 尽力而为、**永不抛错**；
- * `apply` 失败**要**报错（见 `src/account-hub-rpc.ts` 的两个 case）。
+ * 迁移后它答的是**运输层可用性**，不再答「宿主磁盘上那份补丁打没打上」：伪装参数由
+ * `src/account-hub-masquerade-transport.ts` 在请求出网前就地写进这次请求自己的头，
+ * 随插件进程一起装载，**没有可失败的落盘状态**。
  *
- * ## 为什么 `available` 与 `applied` 是两个字段而不是一个三态枚举
- *
- * 两者正交：`available` 说的是「这个环境有没有装外部 provider 适配器」（没有 = 功能
- * 整体不适用，**不是错误**），`applied` 说的是「补丁此刻在不在文件里」。合成一个枚举
- * 会让「装了但没打」与「没装」共用一个值，而界面对这两者的处置完全不同（前者提示去
- * 打开开关，后者应当什么都不说）。
+ * 故两个方法的出参形状完全相同，且**都永不抛错** —— 没有「打失败」这种结果可报，
+ * 硬造一个错误分支只会让客户端多一条永远不可达的告警链。
  */
 export interface RpcMasqueradeResponse {
   /**
-   * 目标文件是否**存在**（`@deepseek-ai/dsh-llm-pi-ai` 的产物）。
+   * 运输层在**本进程内**是否可用。
    *
-   * `false` = 该 profile 没装外部适配器 ⇒ 伪装整体不适用，`reason` 给出中文说明。
+   * 恒为 `true`：能答出这条响应就说明插件已装载（运输层模块与该响应同属一个进程）。
+   * 保留这个字段是为了让客户端的「可用性」判据不必随实现迁移而改写。
    */
   available: boolean
-  /** 补丁此刻是否**完整在场**（判据链全过；`false` 不代表文件坏了）。 */
-  applied: boolean
-  /** 中文原因：`available` 为 `false` 时必有；`failed` 时是判据链给出的具体原因。 */
-  reason?: string
-  /** 目标包当前版本（读不到则缺席）—— 供界面区分「未打补丁」与「版本不匹配」。 */
-  targetVersion?: string
+  /**
+   * 运输层实现标识（**不是开关**）：`'als-fetch'` = `AsyncLocalStorage` 绑定本次请求的
+   * 伪装载荷 + `globalThis.fetch` 包装器在出网前写头。
+   *
+   * 将来换实现只改这个值，字段形状不变。
+   */
+  transport?: string
 }
 
 /** 存储在 CODEARTS_ACCESS_TOKEN 下的归一化临时凭据。 */
