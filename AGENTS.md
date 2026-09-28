@@ -74,6 +74,8 @@
 
 新增功能：`src/`（客户端 UI 改 `plugin-src/client/`）实现 → 补单测 → `pnpm build:all` → `pnpm test` → 更新文档；调试用 `pnpm typecheck`。单测覆盖核心逻辑（签名、续期、参数构造、账号池），不依赖网络。
 
+发版（用户明确要求时）：`package.json` 的 `version` 与 git tag `vX.Y.Z` 同步更新，版本号提交推送后再打轻量 tag 并建 GitHub Release（`gh release create vX.Y.Z --title vX.Y.Z --notes-file <文件>`）。
+
 ## 详细文档
 
 - `docs/agents/providers-buddy.md` — Buddy 系协议细节（上下文窗口口径 / max_tokens / 出站协议值 / 签到 / 余额）
