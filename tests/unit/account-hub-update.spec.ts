@@ -1,12 +1,14 @@
 import { join } from 'node:path'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { registerAccountHubRpc } from '../../src/account-hub-rpc.js'
 import {
   appendAccountHubAllowBuild,
   applyAccountHubUpdate,
   checkAccountHubUpdate,
   extractAccountHubSha,
+  lastAccountHubApplyResult,
   removeStaleAllowBuildEntries,
+  resetAccountHubUpdateState,
   type AccountHubUpdateDeps,
   type AccountHubUpdateExec,
 } from '../../src/account-hub-update.js'
@@ -23,6 +25,20 @@ const ACCOUNT_HUB_PIN = 'github:gurio-wine/dsh-account-hub'
 const LOCK_PATH = join(PROFILE_ROOT, 'pnpm-lock.yaml')
 const PACKAGE_PATH = join(PROFILE_ROOT, 'package.json')
 const WORKSPACE_PATH = join(PROFILE_ROOT, 'pnpm-workspace.yaml')
+
+function deferred<T>(): {
+  promise: Promise<T>
+  resolve: (value: T | PromiseLike<T>) => void
+  reject: (reason?: unknown) => void
+} {
+  let resolve!: (value: T | PromiseLike<T>) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise
+    reject = rejectPromise
+  })
+  return { promise, resolve, reject }
+}
 
 function makeLockfile(sha: string): string {
   return [
@@ -207,6 +223,41 @@ function makeDeps(options: {
   }
 }
 
+/**
+ * 构造一个在首次 add 阶段挂起的依赖：用于验证模块级互斥，而不是依赖
+ * 定时器或真实子进程。首次 add 放行后，后续调用会正常完成，便于同时验证
+ * finally 确实释放锁。
+ */
+function makePausedApplyDeps() {
+  const addStarted = deferred<void>()
+  const addGate = deferred<void>()
+  let files: Map<string, string> | undefined
+  let addCallCount = 0
+  const prepared = makeDeps({
+    packageJson: '{\n  "name": "fake-profile",\n  "private": true\n}\n',
+    exec: async (_command, args) => {
+      if (args[0] !== 'add') return { stdout: '卸载完成\\n', stderr: '' }
+
+      addCallCount += 1
+      if (addCallCount === 1) {
+        addStarted.resolve(undefined)
+        await addGate.promise
+      }
+      const pin = String(args[1])
+      const addedSha = pin.split('#').at(-1) ?? LATEST_SHA
+      files?.set(LOCK_PATH, makeLockfile(addedSha))
+      files?.set(PACKAGE_PATH, makePackageJson(pin))
+      return { stdout: '安装完成\\n', stderr: '' }
+    },
+  })
+  files = prepared.files
+  return {
+    ...prepared,
+    addStarted: addStarted.promise,
+    releaseAdd: () => addGate.resolve(undefined),
+  }
+}
+
 function makeUpdateRpcCaller(deps: AccountHubUpdateDeps) {
   let handler: ((request: Request) => Promise<Response>) | undefined
   const ctx: Record<string, unknown> = {}
@@ -254,6 +305,10 @@ function makeUpdateRpcCaller(deps: AccountHubUpdateDeps) {
 }
 
 describe('Account Hub 更新 RPC 逻辑', () => {
+  // 模块级互斥/进度/最近结果是跨用例的共享状态：每条用例结束都复位，
+  // 防止上一条把锁或 applied 残留漏给下一条（并发用例尤其会污染）。
+  afterEach(() => { resetAccountHubUpdateState() })
+
   it('从 dependencies 中 dsh-account-hub 的 tarball URL 提取完整 SHA 并返回客户端字段', async () => {
     const { deps, fetcher } = makeDeps()
     const result = await checkAccountHubUpdate(deps)
@@ -725,6 +780,82 @@ describe('Account Hub 更新 RPC 逻辑', () => {
       'pnpm add failed (code 1)\n\nstdout:\nremove stdout\nstderr:\nremove stderr\nstdout:\nadd stdout\nstderr:\nadd stderr',
     )
     expect(exec).toHaveBeenCalledTimes(2)
+  })
+
+  it('apply 进行中拒绝第二笔 apply，并在首笔完成后释放锁', async () => {
+    const paused = makePausedApplyDeps()
+    // 模块级互斥保护 remove→add 期间的半套磁盘状态；首次 add 挂起时第二笔必须立即让路。
+    const first = applyAccountHubUpdate(paused.deps)
+    await paused.addStarted
+
+    try {
+      await expect(applyAccountHubUpdate(paused.deps)).rejects.toThrow('更新进行中')
+    } finally {
+      // 用例必须等首笔 promise settle，避免模块级锁残留污染后续用例。
+      paused.releaseAdd()
+      await expect(first).resolves.toMatchObject({
+        previousSha: CURRENT_SHA,
+        currentSha: LATEST_SHA,
+      })
+    }
+
+    // 首笔 finally 已释放模块级锁；第二次调用不应再得到互斥错误。
+    await expect(applyAccountHubUpdate(paused.deps)).resolves.toMatchObject({
+      previousSha: LATEST_SHA,
+      currentSha: LATEST_SHA,
+    })
+  })
+
+  it('apply 进行中拒绝 check，首笔完成后仍能正常收尾', async () => {
+    const paused = makePausedApplyDeps()
+    // check 与 apply 共享模块级互斥，避免 check 读到 remove/add 之间的半套文件。
+    const first = applyAccountHubUpdate(paused.deps)
+    await paused.addStarted
+
+    try {
+      await expect(checkAccountHubUpdate(paused.deps)).rejects.toThrow('更新进行中')
+    } finally {
+      // 无论断言是否成功都释放受控 add，并等待 apply 的 finally 执行。
+      paused.releaseAdd()
+      await expect(first).resolves.toMatchObject({
+        previousSha: CURRENT_SHA,
+        currentSha: LATEST_SHA,
+      })
+    }
+  })
+
+  it('apply 失败后释放锁，并保存失败结果快照', async () => {
+    const failure = Object.assign(new Error('受控安装失败'), {
+      code: 1,
+      stdout: 'add stdout',
+      stderr: 'add stderr',
+    })
+    const { deps, exec } = makeDeps({ exec: async () => { throw failure } })
+    // 失败路径也必须执行模块级互斥的 finally，否则后续更新会永久收到“更新进行中”。
+    await expect(applyAccountHubUpdate(deps)).rejects.toThrow('受控安装失败')
+    await expect(applyAccountHubUpdate(deps)).rejects.toThrow('受控安装失败')
+    expect(exec).toHaveBeenCalledTimes(2)
+    expect(lastAccountHubApplyResult()).toMatchObject({
+      ok: false,
+      previousSha: '',
+      currentSha: '',
+      error: expect.stringContaining('受控安装失败'),
+    })
+    expect(lastAccountHubApplyResult()?.error).not.toContain('更新进行中')
+  })
+
+  it('apply 成功后保存成功结果快照', async () => {
+    const { deps } = makeDeps()
+    // 成功路径同样写入模块级最近结果，供更新状态在 apply 返回后继续读取。
+    await expect(applyAccountHubUpdate(deps)).resolves.toMatchObject({
+      previousSha: CURRENT_SHA,
+      currentSha: LATEST_SHA,
+    })
+    expect(lastAccountHubApplyResult()).toEqual({
+      ok: true,
+      previousSha: CURRENT_SHA,
+      currentSha: LATEST_SHA,
+    })
   })
 
   it('update RPC 将 beta 透传给 check/apply，缺省和非法 channel 回退 stable', async () => {

@@ -253,6 +253,10 @@ export async function checkAccountHubUpdate(
   deps: AccountHubUpdateDeps,
   channel: RpcUpdateChannel = 'stable',
 ): Promise<RpcUpdateCheckResponse> {
+  // 检查也要让位于进行中的应用：remove/add 两步之间磁盘是半套状态
+  // （package.json 可能已没有依赖、lockfile 还没写入新 SHA），此刻读到
+  // 什么都会把「未安装」误报给用户。拒绝并让客户端稍后重查。
+  if (updateApplyInProgress) throw new Error(UPDATE_APPLY_IN_PROGRESS_ERROR)
   const lockfile = await deps.readFile(join(deps.profileRoot, 'pnpm-lock.yaml'))
   const currentSha = findAccountHubSha(lockfile) ?? ''
   const latest = await fetchLatestVersion(deps, channel)
@@ -416,7 +420,90 @@ export function removeStaleAllowBuildEntries(workspaceFile: string, keepSha: str
   return joinLines(lines, newline, endsWithNewline)
 }
 
+/** 更新进行中的统一拒绝语：apply 与 check 共用，防第二个请求交叉读写磁盘。 */
+const UPDATE_APPLY_IN_PROGRESS_ERROR = 'Account Hub 更新进行中，请稍后再试'
+
+/** 模块级互斥：同一时刻只允许一笔 apply（或一笔 check）跑更新链路。 */
+let updateApplyInProgress = false
+
+/**
+ * 最近一笔 apply 的结果快照（成功与失败都存）：`update.status` 在 apply 结束
+ * 后继续读它，页面刷新/重挂载也能拿到「已完成 / 已失败」而不是回到 idle。
+ */
+let lastAccountHubApplyOutcome: {
+  ok: boolean
+  previousSha: string
+  currentSha: string
+  error?: string
+} | null = null
+
+/**
+ * 读最近一笔 apply 的结果快照（无则 null）。RPC `update.status` 用它把
+ * 「更新后页面刷新」的状态找回来，而不是永远停在 applying。
+ */
+export function lastAccountHubApplyResult(): {
+  ok: boolean
+  previousSha: string
+  currentSha: string
+  error?: string
+} | null {
+  return lastAccountHubApplyOutcome
+}
+
+/**
+ * 复位模块级互斥/进度/最近结果（仅供单测隔离用例间共享状态）。
+ * 运行时没有任何调用方：更新链路自身从不复位 —— 锁由 apply 的 finally
+ * 释放，最近结果由下一笔 apply 覆写。
+ */
+export function resetAccountHubUpdateState(): void {
+  updateApplyInProgress = false
+  lastAccountHubApplyOutcome = null
+}
+
+/**
+ * 测试隔离钩子：把模块级互斥位与结果快照拨回初始态。
+ *
+ * 单测里「apply 进行中」用例会把模块状态打到非 idle，后续用例的
+ * 「初始 status 应为 idle」断言会被残留污染 —— 仅测试文件在收尾时调用，
+ * 产品代码零调用（不参与任何运行期行为）。
+ */
+export function resetAccountHubUpdateStateForTest(): void {
+  updateApplyInProgress = false
+  lastAccountHubApplyOutcome = null
+}
+
 export async function applyAccountHubUpdate(
+  deps: AccountHubUpdateDeps,
+  channel: RpcUpdateChannel = 'stable',
+  onProgress: AccountHubUpdateProgress = NOOP_ACCOUNT_HUB_UPDATE_PROGRESS,
+  targetSha?: string,
+): Promise<RpcUpdateApplyResponse> {
+  // 互斥：第二笔 apply / apply 进行中的 check 直接拒绝 —— remove→add 链路
+  // 交叉执行会互相污染 package.json / lockfile / allowBuilds，谁后写谁说了算。
+  if (updateApplyInProgress) throw new Error(UPDATE_APPLY_IN_PROGRESS_ERROR)
+  updateApplyInProgress = true
+  try {
+    const result = await applyAccountHubUpdateLocked(deps, channel, onProgress, targetSha)
+    lastAccountHubApplyOutcome = {
+      ok: true,
+      previousSha: result.previousSha,
+      currentSha: result.currentSha,
+    }
+    return result
+  } catch (error) {
+    lastAccountHubApplyOutcome = {
+      ok: false,
+      previousSha: '',
+      currentSha: '',
+      error: error instanceof Error ? error.message : String(error),
+    }
+    throw error
+  } finally {
+    updateApplyInProgress = false
+  }
+}
+
+async function applyAccountHubUpdateLocked(
   deps: AccountHubUpdateDeps,
   channel: RpcUpdateChannel = 'stable',
   onProgress: AccountHubUpdateProgress = NOOP_ACCOUNT_HUB_UPDATE_PROGRESS,
