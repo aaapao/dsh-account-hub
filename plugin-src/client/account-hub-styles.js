@@ -139,9 +139,6 @@ const STYLES = `
    dropPositionFromPointer 的判定同向，否则用户按线拖放却落在相反位置。 */
 .dim-ah-accountCard[data-dropBefore="true"]::before { content: ''; position: absolute; left: 0; right: 0; top: -6px; height: 3px; border-radius: 2px; background: var(--dsw-alias-brand-primary); }
 .dim-ah-accountCard[data-dropAfter="true"]::after { content: ''; position: absolute; left: 0; right: 0; bottom: -6px; height: 3px; border-radius: 2px; background: var(--dsw-alias-brand-primary); }
-/* 序号徽标：让当前优先级一目了然（顺序即选号优先级） */
-.dim-ah-accountOrder { flex: none; min-width: 18px; padding: 0 5px; border-radius: 6px; font-size: var(--dsw-font-xxxs-11-font-size); line-height: var(--dsw-font-xxxs-11-line-height); font-weight: var(--dsw-font-xxxs-strong-11-font-weight); text-align: center; color: var(--dsw-alias-label-secondary); background: var(--dsw-alias-bg-module-platform); }
-
 /* 顶部一行：状态点 + 名称 + 状态标签 */
 .dim-ah-accountTop { display: flex; align-items: center; gap: 8px; }
 .dim-ah-accountName { flex: 1 1 auto; min-width: 0; overflow: hidden; font-size: var(--dsw-font-s-14-font-size); line-height: var(--dsw-font-s-14-line-height); font-weight: var(--dsw-font-s-strong-14-font-weight); color: var(--dsw-alias-label-primary); text-overflow: ellipsis; white-space: nowrap; }
@@ -357,17 +354,14 @@ const STYLES = `
 .dim-ah-arCard[data-dropBefore="true"]::before { content: ''; position: absolute; left: 0; right: 0; top: -6px; height: 3px; border-radius: 2px; background: var(--dsw-alias-brand-primary); }
 .dim-ah-arCard[data-dropAfter="true"]::after { content: ''; position: absolute; left: 0; right: 0; bottom: -6px; height: 3px; border-radius: 2px; background: var(--dsw-alias-brand-primary); }
 
-/* 卡片头：拖拽柄 + 序号 + 名称按钮 + 折叠按钮 + 删除按钮；名称列优先压缩。
-   列数必须与 DOM 子节点一一对应，名称列吃满剩余宽度。 */
-.dim-ah-arCardHead { display: grid; grid-template-columns: 16px max-content minmax(0, 1fr) max-content max-content; align-items: center; gap: 8px; }
-.dim-ah-arCardHead[data-drag-enabled="false"] { grid-template-columns: max-content minmax(0, 1fr) max-content max-content; }
-/* 序号徽标：与账号卡片的 .dim-ah-accountOrder 同义（顺序即降级顺序），
-   但这里显示的是**定义**序号，故另起一个类名而不是复用。 */
-.dim-ah-arOrder { min-width: 18px; padding: 0 5px; border-radius: 6px; font-size: var(--dsw-font-xxxs-11-font-size); line-height: var(--dsw-font-xxxs-11-line-height); font-weight: var(--dsw-font-xxxs-strong-11-font-weight); text-align: center; color: var(--dsw-alias-label-secondary); background: var(--dsw-alias-bg-module-platform); }
+/* 卡片头：有拖拽柄时为拖拽柄 + 名称按钮 + 折叠按钮 + 删除按钮；名称列优先压缩。
+   无拖拽柄时去掉首列；列数必须与 DOM 子节点一一对应，名称列吃满剩余宽度。 */
+.dim-ah-arCardHead { display: grid; grid-template-columns: 16px minmax(0, 1fr) max-content max-content; align-items: center; gap: 8px; }
+.dim-ah-arCardHead[data-drag-enabled="false"] { grid-template-columns: minmax(0, 1fr) max-content max-content; }
 /* 自动模型名称是纯文本按钮：默认不画边框与底色，长名称在名称列内省略。
    min-width: 0 与卡头的 minmax(0, 1fr) 配套，保证名称不会把折叠 / 删除按钮挤出卡片。
    悬停提示由 withHoverTitle 负责，按钮本身只保留可点击的文本观感。 */
-.dim-ah-arNameButton { box-sizing: border-box; width: 100%; min-width: 0; max-width: 100%; padding: 4px 8px; border: none; border-radius: 6px; background: transparent; color: var(--dsw-alias-label-primary); font: inherit; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+.dim-ah-arNameButton { box-sizing: border-box; width: 100%; min-width: 0; max-width: 100%; padding: 4px 8px; border: none; border-radius: 6px; background: transparent; color: var(--dsw-alias-label-primary); font: inherit; font-size: var(--dsw-font-xs-13-font-size); line-height: var(--dsw-font-xs-13-line-height); text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
 .dim-ah-arNameButton:hover:not(:disabled) { background: transparent; color: var(--dsw-alias-label-primary); }
 .dim-ah-arNameButton:disabled { cursor: not-allowed; opacity: .4; }
 .dim-ah-arNameButton:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary)); }
@@ -408,7 +402,7 @@ const STYLES = `
    （--dsw-font-xs-13-*，正是 s-14 之下、xxs-12 之上的那一级）。
    font: inherit 必须保留 —— button 元素默认**不**继承字体，删掉它按钮会掉回
    浏览器默认字体族；故写法是「先整体 inherit，再用 font-size / line-height 两个
-   长写各覆盖一档」，与 .dim-ah-arOrder 的令牌对写法同源、顺序也不能颠倒。
+   长写各覆盖一档」，顺序不能颠倒。
    ⚠️ 本文件整体是一段模板字面量，注释里**不得出现反引号**（会截断字符串）。 */
 .dim-ah-arEntryText { box-sizing: border-box; min-width: 0; max-width: 100%; padding: 4px 8px; border: none; border-radius: 6px; background: transparent; font: inherit; font-size: var(--dsw-font-xs-13-font-size); line-height: var(--dsw-font-xs-13-line-height); color: var(--dsw-alias-label-primary); text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
 .dim-ah-arEntryText:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover); }

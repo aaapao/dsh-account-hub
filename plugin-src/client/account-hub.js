@@ -682,17 +682,12 @@ function AccountCard({ account, index, order, onToggle, onDelete, busy, credits,
     onDrop: dragProps.onDrop,
   },
     React.createElement('div', { className: 'dim-ah-accountTop' },
-      // 抓取柄 + 序号：序号即自动选号优先级，让「拖到第一位」的含义明确 ——
-      // 顺序不是装饰，它直接决定下一个请求用哪个账号（见 account-order.js）。
+      // 抓取柄：拖拽时提供明确的抓取区域，顺序仍由拖拽落点决定。
       dragProps.enabled
         ? React.createElement('span', {
             className: 'dim-ah-dragHandle',
             'aria-hidden': 'true',
           }, '⠿')
-        : null,
-      dragProps.enabled
-        ? React.createElement('span', { className: 'dim-ah-accountOrder' },
-            String((order ?? index ?? 0) + 1))
         : null,
       // 状态点：绿=已启用、灰=已停用（`StateDot` 的 done / idle 两档）。
       // 迁移前是一个自绘的 8px 圆点 + `title`；现在两者都来自设计体系，
@@ -2781,7 +2776,6 @@ function AutoRouteEntryEditor({
         React.createElement(Input, {
           className: 'dim-ah-arEditorUaInput',
           value: userAgent,
-          disabled: busy,
           // 可读名走 aria-label：placeholder 是给眼睛看的默认值，不能拿它当名称
           // （它随 provider 变化，读屏用户听到的会是「一个 UA 字符串」而不是字段名）。
           'aria-label': 'User-Agent',
@@ -2806,7 +2800,6 @@ function AutoRouteEntryEditor({
         React.createElement(Input, {
           className: 'dim-ah-arEditorOriginatorInput',
           value: originator,
-          disabled: busy,
           // 可读名走 aria-label（与 UA 行同因：placeholder 是提示，不能拿它当字段名）。
           'aria-label': 'Originator',
           placeholder: AUTO_ROUTE_ORIGINATOR_PLACEHOLDER,
@@ -2942,6 +2935,14 @@ function AutoRoutePanel({ rpcCall }) {
    * 而 `draft` state 在异步回调里读到的是**闭包快照**（发起时的值），必须靠 ref。
    */
   const draftRef = React.useRef([]);
+  /**
+   * 保存队列的**权威副本**（`saveModels` 的串行化状态）。
+   *
+   * `tail` 是链尾 Promise：每笔保存排到链尾执行，前一笔完成（含失败）后一笔才发，
+   * 防止连续编辑时旧响应晚到、把新草稿覆盖掉；`pending` 统计整条链在途笔数，
+   * 归零才清 `saving`（排队等待期也算忙，按钮照常禁用）。
+   */
+  const saveQueueRef = React.useRef({ tail: Promise.resolve(), pending: 0 });
   /**
    * 档位缓存的**权威副本**。
    *
@@ -3091,7 +3092,7 @@ function AutoRoutePanel({ rpcCall }) {
    * 成功后用**宿主返回的**列表覆盖草稿（服务端可能补全/规整字段）；失败保留
    * 草稿与错误行 —— 用户继续编辑，下一次合法修改会再次触发提交。
    */
-  const saveModels = async (nextDraft) => {
+  const saveModels = (nextDraft) => {
     // 中间态不提交：空 entries 卡片 / 空 provider-model 候选是编辑过程的合法
     // 暂态，但服务端会拒。此时只留本地，等下一条合法编辑一起提交。
     const submittable = Array.isArray(nextDraft) && nextDraft.length >= 0
@@ -3100,25 +3101,39 @@ function AutoRoutePanel({ rpcCall }) {
         && def.entries.every(entry => entry && typeof entry.provider === 'string' && entry.provider !== ''
           && typeof entry.model === 'string' && entry.model !== ''));
     if (!submittable) return;
-    setSaving(true);
+
+    // 每个面板实例维护自己的保存链：后一笔必须等前一笔完成后再发，
+    // 避免连续编辑时旧响应晚到、把新草稿覆盖掉。pending 统计整条链上的在途笔数，
+    // 而不是只统计当前正在执行的那一笔，保证 busy 状态覆盖排队等待期。
+    const queue = saveQueueRef.current;
+    queue.pending += 1;
+    if (queue.pending === 1) setSaving(true);
     setSaveError(null);
-    try {
-      const res = await rpcCall('autoroute.set', { models: nextDraft });
-      if (!mounted.current) return;
-      // 只有「宿主权威值与本地草稿不一致」才覆盖：用户在请求在途时又改了一笔，
-      // 覆盖会把那一笔丢掉（改判为等下一次提交带上）。
-      const current = draftRef.current;
-      if (JSON.stringify(current) === JSON.stringify(nextDraft)) {
-        setDraft(Array.isArray(res?.models) ? res.models : nextDraft);
+
+    const saveOne = async () => {
+      try {
+        const res = await rpcCall('autoroute.set', { models: nextDraft });
+        if (!mounted.current) return;
+        // 只有「宿主权威值与本地草稿不一致」才覆盖：用户在请求在途时又改了一笔，
+        // 覆盖会把那一笔丢掉（改判为等下一次提交带上）。
+        const current = draftRef.current;
+        if (JSON.stringify(current) === JSON.stringify(nextDraft)) {
+          setDraft(Array.isArray(res?.models) ? res.models : nextDraft);
+        }
+      } catch (caught) {
+        console.error('[account-hub] save auto-route models failed:', caught);
+        if (!mounted.current) return;
+        // 服务端消息点名到具体定义与字段（中文），原样显示 —— 那是用户唯一能据以改正的信息。
+        setSaveError(caught?.message || '保存失败');
+      } finally {
+        queue.pending -= 1;
+        if (mounted.current && queue.pending === 0) setSaving(false);
       }
-    } catch (caught) {
-      console.error('[account-hub] save auto-route models failed:', caught);
-      if (!mounted.current) return;
-      // 服务端消息点名到具体定义与字段（中文），原样显示 —— 那是用户唯一能据以改正的信息。
-      setSaveError(caught?.message || '保存失败');
-    } finally {
-      if (mounted.current) setSaving(false);
-    }
+    };
+
+    // 即使前一笔异常，saveOne 也会吞掉异常并在 finally 收口；额外 catch 兜住链上
+    // 未预期的异常，让后续编辑仍能接着排队，不把 Promise rejection 泄漏到全局。
+    queue.tail = queue.tail.then(saveOne, saveOne).catch(() => {});
   };
 
   /**
@@ -3372,7 +3387,7 @@ function AutoRoutePanel({ rpcCall }) {
   };
 
   /** 渲染一个自动模型定义卡片（普通函数，不是组件：它要直接闭包面板状态）。 */
-  const renderDefinition = (def, index) => {
+  const renderDefinition = (def) => {
     const cardDrag = dragPropsFor('def', null, def.id, draft.length);
     const isOpen = expandedDefIds.has(def.id);
     const nameLabel = def.name === '' ? '（未命名）' : def.name;
@@ -3397,7 +3412,6 @@ function AutoRoutePanel({ rpcCall }) {
               'aria-hidden': 'true',
             }, '⠿')
           : null,
-        React.createElement('span', { className: 'dim-ah-arOrder' }, String(index + 1)),
         React.createElement(Button, {
           variant: 'ghost',
           size: 'sm',
@@ -3568,7 +3582,6 @@ function AutoRoutePanel({ rpcCall }) {
           React.createElement(Input, {
             className: 'dim-ah-arNameInput',
             value: editingDefinition.name,
-            disabled: saving,
             'aria-label': '自动模型名称',
             onChange: (event) => renameDefinition(editingDefinition.id, event?.target?.value ?? ''),
           }))

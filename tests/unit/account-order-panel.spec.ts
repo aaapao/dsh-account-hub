@@ -434,6 +434,10 @@ describe('账号拖拽排序（渲染级事件接线）', () => {
     const tree = await renderStable(client.ProviderPanel, panelProps(rpcCall), client.hooks)
     const cards = accountCards(tree)
     expect(cards.length, '没渲染出三张账号卡片').toBe(3)
+    expect(flatten(tree).filter(isElement).some((el) =>
+      typeof el.props.className === 'string'
+      && el.props.className.split(/\s+/).includes('dim-ah-accountOrder'),
+    ), '账号卡片不应再渲染可见序号').toBe(false)
     for (const card of cards) {
       const dragProps = dragPropsOf(card)
       expect(dragProps.draggable).toBe('true')

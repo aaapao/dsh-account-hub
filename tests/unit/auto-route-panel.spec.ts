@@ -425,21 +425,36 @@ const EFFORTS: Record<string, { efforts: string[]; defaultEffort?: string }> = {
  * 回传（客户端以返回值为准）。`setFails` 让写入抛错（模拟服务端 `assertValid` 拒绝），
  * 用于验证「失败时草稿保留 + 显示服务端中文消息」。
  *
- * `catalogFailures` / `holdModelInfo` 是本单新增的两个**时序注入点**：
+ * `catalogFailures` / `holdModelInfo` / `holdSet` 是本单的时序注入点：
  * - `catalogFailures: n` 让前 n 次 `autoroute.catalog` 抛错（之后成功）——「目录拉不到
  *   时面板必须说话，且『重试』真的能恢复」需要「先失败、后成功」这条路径；
  * - `holdModelInfo: true` 让 `autoroute.model-info` **永不结算** —— 档位「在途」这个
- *   窗口只有把请求按住才观察得到（正常替身在同一轮微任务里就回了）。
+ *   窗口只有把请求按住才观察得到（正常替身在同一轮微任务里就回了）；
+ * - `holdSet: true` 让 `autoroute.set` 由测试手动结算，用来钉住连续编辑的保存顺序。
  */
 function makeRpc(options: {
   config?: typeof CONFIG
   setFails?: string
   catalogFailures?: number
   holdModelInfo?: boolean
+  holdSet?: boolean
 } = {}) {
   const calls: Array<{ method: string; payload: Record<string, unknown> }> = []
   let current = JSON.parse(JSON.stringify(options.config ?? CONFIG)) as typeof CONFIG
   let catalogAttempts = 0
+  const pendingSetResolvers: Array<() => void> = []
+  const applySet = (payload: Record<string, unknown>) => {
+    current = {
+      enabled: (payload.enabled as boolean) ?? current.enabled,
+      models: (payload.models as typeof CONFIG.models) ?? current.models,
+    }
+    return JSON.parse(JSON.stringify(current))
+  }
+  const resolveNextSet = () => {
+    const resolve = pendingSetResolvers.shift()
+    if (resolve === undefined) throw new Error('没有待结算的 autoroute.set')
+    resolve()
+  }
   const rpcCall = async (method: string, payload: Record<string, unknown>) => {
     calls.push({ method, payload })
     if (method === 'autoroute.get') return JSON.parse(JSON.stringify(current))
@@ -458,15 +473,16 @@ function makeRpc(options: {
     }
     if (method === 'autoroute.set') {
       if (options.setFails !== undefined) throw new Error(options.setFails)
-      current = {
-        enabled: (payload.enabled as boolean) ?? current.enabled,
-        models: (payload.models as typeof CONFIG.models) ?? current.models,
+      if (options.holdSet === true) {
+        return new Promise((resolve) => {
+          pendingSetResolvers.push(() => resolve(applySet(payload)))
+        })
       }
-      return JSON.parse(JSON.stringify(current))
+      return applySet(payload)
     }
     return {}
   }
-  return { calls, rpcCall, currentConfig: () => current }
+  return { calls, rpcCall, currentConfig: () => current, resolveNextSet }
 }
 
 /**
@@ -801,6 +817,9 @@ describe('AutoRoutePanel：挂载与总开关', () => {
     expect(switchOf(tree).props['aria-label'], '开关必须带可读名').toBe('启用自动路由')
     // 编辑器同屏渲染：两个定义各一张卡片。
     expect(cardsOf(tree)).toHaveLength(2)
+    // 序号徽标已移除；拖拽接线仍由卡头上的 drag handle 提供。
+    expect(elementsOf(tree).some((el) => hasClass(el, 'dim-ah-arOrder')),
+      '自动模型卡片不应再渲染可见序号').toBe(false)
   })
 
   it('标题行含唯一开关，列表底部提供文字添加入口', async () => {
@@ -970,6 +989,40 @@ describe('AutoRoutePanel：草稿编辑（修改即保存）', () => {
     expect(payload.models.map((d) => d.name), '载荷应携带新名').toEqual(['极速', '强力'])
     // 成功后无错误行。
     expect(errorLinesOf(tree), '成功提交后不该有错误行').toHaveLength(0)
+  })
+
+  it('保存挂起时不禁用正在编辑的 Input，连续改名按序提交', async () => {
+    const { calls, rpcCall, resolveNextSet } = makeRpc({ holdSet: true })
+    let tree = await settle(client.AutoRoutePanel, panelProps(rpcCall), client.hooks, true)
+
+    tree = await openDefinitionNameEditor(tree, rpcCall, 0)
+    typeInto(renameInputOf(tree), '快')
+    for (let i = 0; i < 12; i++) await Promise.resolve()
+    tree = await settle(client.AutoRoutePanel, panelProps(rpcCall), client.hooks)
+    expect(renameInputOf(tree).props.disabled, '保存挂起时正在编辑的 Input 不应被禁用').toBeFalsy()
+    expect(calls.filter((c) => c.method === 'autoroute.set')).toHaveLength(1)
+
+    // 第一笔仍在途时再改一次：第二笔只能排队，不能提前调用 autoroute.set。
+    typeInto(renameInputOf(tree), '快速')
+    for (let i = 0; i < 12; i++) await Promise.resolve()
+    tree = await settle(client.AutoRoutePanel, panelProps(rpcCall), client.hooks)
+    const beforeResolve = calls.filter((c) => c.method === 'autoroute.set')
+    expect(beforeResolve, '第一笔未完成前不应发出第二笔 autoroute.set').toHaveLength(1)
+    expect((beforeResolve[0]!.payload as { models: Array<{ name: string }> }).models[0]!.name).toBe('快')
+
+    // 依次结算第一笔、第二笔，第二笔必须在第一笔完成后才发出。
+    resolveNextSet()
+    for (let i = 0; i < 12; i++) await Promise.resolve()
+    tree = await settle(client.AutoRoutePanel, panelProps(rpcCall), client.hooks)
+    const afterFirstResolve = calls.filter((c) => c.method === 'autoroute.set')
+    expect(afterFirstResolve, '第一笔结算后应补发排队中的第二笔').toHaveLength(2)
+    expect((afterFirstResolve[1]!.payload as { models: Array<{ name: string }> }).models[0]!.name).toBe('快速')
+
+    resolveNextSet()
+    for (let i = 0; i < 12; i++) await Promise.resolve()
+    tree = await settle(client.AutoRoutePanel, panelProps(rpcCall), client.hooks)
+    expect(renameInputOf(tree).props.value, '第二笔保存完成后输入值应保留').toBe('快速')
+    expect(renameInputOf(tree).props.disabled, '保存队列收口后 Input 仍应可编辑').toBeFalsy()
   })
 
   it('添加自动模型：新定义 name 为「自动模型 N」且不与已有定义重名', async () => {
@@ -1708,5 +1761,17 @@ describe('AccountHubPage：左侧「自动路由」选项卡', () => {
     expect(inheritAt, 'font: inherit 必须保留（button 元素默认不继承字体族）').toBeGreaterThan(-1)
     expect(sizeAt, '降档的 font-size 必须写在 font: inherit 之后（否则被 shorthand 覆盖回去）')
       .toBeGreaterThan(inheritAt)
+
+    const nameAt = styles.indexOf('.dim-ah-arNameButton {')
+    expect(nameAt, 'account-hub-styles.js 里找不到 .dim-ah-arNameButton 规则').toBeGreaterThan(-1)
+    const nameRule = styles.slice(nameAt, styles.indexOf('}', nameAt))
+    expect(nameRule, '自动模型名称按钮必须使用 13px 字号令牌').toContain('--dsw-font-xs-13-font-size')
+    expect(nameRule, '自动模型名称按钮行高必须使用同一档令牌')
+      .toContain('--dsw-font-xs-13-line-height')
+    const nameInheritAt = nameRule.indexOf('font: inherit')
+    const nameSizeAt = nameRule.indexOf('font-size:')
+    expect(nameInheritAt, '名称按钮必须保留 font: inherit').toBeGreaterThan(-1)
+    expect(nameSizeAt, '名称按钮的字号令牌必须写在 font: inherit 之后')
+      .toBeGreaterThan(nameInheritAt)
   })
 })
