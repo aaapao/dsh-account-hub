@@ -5,6 +5,7 @@ import {
   appendAccountHubAllowBuild,
   applyAccountHubUpdate,
   checkAccountHubUpdate,
+  detectAccountHubUpdateLeftovers,
   extractAccountHubSha,
   lastAccountHubApplyResult,
   removeStaleAllowBuildEntries,
@@ -25,6 +26,8 @@ const ACCOUNT_HUB_PIN = 'github:gurio-wine/dsh-account-hub'
 const LOCK_PATH = join(PROFILE_ROOT, 'pnpm-lock.yaml')
 const PACKAGE_PATH = join(PROFILE_ROOT, 'package.json')
 const WORKSPACE_PATH = join(PROFILE_ROOT, 'pnpm-workspace.yaml')
+const NODE_MODULES_PATH = join(PROFILE_ROOT, 'node_modules')
+const ACCOUNT_HUB_PACKAGE_JSON_PATH = join(NODE_MODULES_PATH, 'dsh-account-hub', 'package.json')
 
 function deferred<T>(): {
   promise: Promise<T>
@@ -139,6 +142,7 @@ function makeDeps(options: {
   currentCompareMessages?: string[]
   recentMessages?: string[]
   releaseStatus?: number
+  listDir?: (path: string) => Promise<string[]>
   exec?: AccountHubUpdateExec
   outputChunks?: {
     remove?: string[]
@@ -216,7 +220,14 @@ function makeDeps(options: {
   }
   const exec = vi.fn<AccountHubUpdateExec>(options.exec ?? defaultExec)
   return {
-    deps: { profileRoot: PROFILE_ROOT, readFile, writeFile, fetcher, exec },
+    deps: {
+      profileRoot: PROFILE_ROOT,
+      readFile,
+      writeFile,
+      listDir: options.listDir,
+      fetcher,
+      exec,
+    },
     files,
     fetcher,
     exec,
@@ -335,6 +346,45 @@ describe('Account Hub 更新 RPC 逻辑', () => {
       `https://api.github.com/repos/gurio-wine/dsh-account-hub/commits/${LATEST_TAG}`,
       expect.objectContaining({ headers: { accept: 'application/vnd.github+json' } }),
     )
+  })
+
+  it('空 node_modules 无残留时返回空报告', async () => {
+    const { deps } = makeDeps({ listDir: async (path) => {
+      expect(path).toBe(NODE_MODULES_PATH)
+      return []
+    } })
+
+    await expect(detectAccountHubUpdateLeftovers(deps)).resolves.toEqual({ items: [] })
+  })
+
+  it('dsh-account-hub 目录缺 package.json 时报告 incomplete-package', async () => {
+    const { deps } = makeDeps({ listDir: async () => ['dsh-account-hub'] })
+
+    await expect(detectAccountHubUpdateLeftovers(deps)).resolves.toEqual({
+      items: [{
+        kind: 'incomplete-package',
+        path: join(NODE_MODULES_PATH, 'dsh-account-hub'),
+        hint: '上次更新中断留下的半装目录，重启宿主后手动删除或重试更新',
+      }],
+    })
+  })
+
+  it('dsh-account-hub_tmp 前缀目录时报告 tmp-dir', async () => {
+    const { deps } = makeDeps({ listDir: async () => ['dsh-account-hub_tmp_123_0'] })
+
+    await expect(detectAccountHubUpdateLeftovers(deps)).resolves.toEqual({
+      items: [{
+        kind: 'tmp-dir',
+        path: join(NODE_MODULES_PATH, 'dsh-account-hub_tmp_123_0'),
+        hint: '上次更新中断留下的半装目录，重启宿主后手动删除或重试更新',
+      }],
+    })
+  })
+
+  it('listDir 失败时残留诊断返回空报告且不抛错', async () => {
+    const { deps } = makeDeps({ listDir: async () => { throw new Error('目录不可读') } })
+
+    await expect(detectAccountHubUpdateLeftovers(deps)).resolves.toEqual({ items: [] })
   })
 
   it('stable 无更新时显示 release tag 并复用 release body 作为当前与最新日志', async () => {
@@ -480,6 +530,7 @@ describe('Account Hub 更新 RPC 逻辑', () => {
       latestVersion: LATEST_TAG,
       changelog: '稳定版本更新日志',
       currentChangelog: '',
+      leftovers: { items: [] },
     })
     expect(() => extractAccountHubSha(lockfile)).toThrow(
       'pnpm-lock.yaml dependencies 段中找不到 dsh-account-hub',
@@ -536,6 +587,7 @@ describe('Account Hub 更新 RPC 逻辑', () => {
       previousSha: CURRENT_SHA,
       currentSha: LATEST_SHA,
       log: 'stdout:\n卸载完成\n\nstdout:\n安装完成\n',
+      restartRequired: true,
     })
     expect(files.get(WORKSPACE_PATH)).toContain(`dsh-account-hub@https://codeload.github.com/gurio-wine/dsh-account-hub/tar.gz/${LATEST_SHA}: true`)
     expect(deps.writeFile).toHaveBeenCalledTimes(1)
@@ -739,6 +791,7 @@ describe('Account Hub 更新 RPC 逻辑', () => {
       previousSha: CURRENT_SHA,
       currentSha: CURRENT_SHA,
       log: '',
+      restartRequired: true,
     })
     expect(files.get(WORKSPACE_PATH)).toBe(workspaceBefore)
     expect(exec).not.toHaveBeenCalled()
@@ -888,6 +941,9 @@ describe('Account Hub 更新 RPC 逻辑', () => {
 
     const initialStatus = await call('update.status', {})
     expect(initialStatus).toEqual({ ok: true, value: { phase: 'idle', detail: '', result: null } })
+
+    const leftovers = await call('update.leftovers', {})
+    expect(leftovers).toEqual({ ok: true, value: { items: [] } })
 
     const betaApply = await call('update.apply', { channel: 'beta' })
     expect(betaApply.ok).toBe(true)

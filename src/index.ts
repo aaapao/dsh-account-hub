@@ -1,5 +1,5 @@
 import { execFile as nodeExecFile, spawn as nodeSpawn, type ChildProcess } from 'node:child_process'
-import { readFile as nodeReadFile, writeFile as nodeWriteFile } from 'node:fs/promises'
+import { readdir as nodeReaddir, readFile as nodeReadFile, writeFile as nodeWriteFile } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
@@ -99,6 +99,10 @@ function createAccountHubUpdateDeps(moduleUrl: string): AccountHubUpdateDeps {
     readFile: (path) => nodeReadFile(path, 'utf8'),
     writeFile: async (path, content) => {
       await nodeWriteFile(path, content, 'utf8')
+    },
+    listDir: async (path) => {
+      const entries = await nodeReaddir(path, { withFileTypes: true })
+      return entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name)
     },
     fetcher: (input, init) => globalThis.fetch(input, init),
     exec: runAccountHubUpdate,

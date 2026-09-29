@@ -1,7 +1,12 @@
 /** Account Hub 插件的检查更新与安装逻辑。 */
 
 import { join } from 'node:path'
-import type { RpcUpdateApplyResponse, RpcUpdateCheckResponse, RpcUpdateChannel } from './types.js'
+import type {
+  RpcUpdateApplyResponse,
+  RpcUpdateCheckResponse,
+  RpcUpdateChannel,
+  RpcUpdateLeftoverReport,
+} from './types.js'
 
 type AccountHubUpdateProgress = (
   phase: 'removing' | 'installing' | 'verifying',
@@ -43,6 +48,8 @@ export interface AccountHubUpdateDeps {
   profileRoot: string
   readFile(path: string): Promise<string>
   writeFile(path: string, content: string): Promise<void>
+  /** 可选目录枚举；缺失时残留诊断安全降级为空报告。 */
+  listDir?: (path: string) => Promise<string[]>
   fetcher: typeof fetch
   exec: AccountHubUpdateExec
 }
@@ -303,6 +310,8 @@ export async function checkAccountHubUpdate(
       : currentSha === '' ? '' : shortSha(currentSha)
     : currentSha === '' ? '' : `${latest.tag}+${shortSha(currentSha, 7)}`
   const latestVersion = channel === 'stable' ? latest.tag : `${latest.tag}+${shortSha(latest.sha, 7)}`
+  // lockfile 缺少目标依赖时，顺带只读扫描一次 node_modules，帮助用户识别上次中断留下的残留。
+  const leftovers = currentSha === '' ? await detectAccountHubUpdateLeftovers(deps) : undefined
 
   return {
     currentSha,
@@ -314,7 +323,53 @@ export async function checkAccountHubUpdate(
     latestVersion,
     changelog,
     currentChangelog,
+    ...(leftovers === undefined ? {} : { leftovers }),
   }
+}
+
+const ACCOUNT_HUB_LEFTOVER_HINT = '上次更新中断留下的半装目录，重启宿主后手动删除或重试更新'
+
+/**
+ * 只读发现更新链中断后留下的目录；任何诊断失败都降级为空报告，不阻断更新主链路。
+ * pnpm store 路径依赖 pnpm 配置，当前不猜测其位置，因此刻意跳过 store 扫描。
+ */
+export async function detectAccountHubUpdateLeftovers(
+  deps: AccountHubUpdateDeps,
+): Promise<RpcUpdateLeftoverReport> {
+  if (deps.listDir === undefined) return { items: [] }
+
+  const nodeModulesPath = join(deps.profileRoot, 'node_modules')
+  let entries: string[]
+  try {
+    entries = await deps.listDir(nodeModulesPath)
+  } catch {
+    return { items: [] }
+  }
+
+  const items: RpcUpdateLeftoverReport['items'] = []
+  for (const entry of entries) {
+    if (entry === 'dsh-account-hub') {
+      try {
+        await deps.readFile(join(nodeModulesPath, entry, 'package.json'))
+      } catch {
+        // listDir 已确认目录存在；缺 package.json 才是半装目录，属于可报告残留。
+        items.push({
+          kind: 'incomplete-package',
+          path: join(nodeModulesPath, entry),
+          hint: ACCOUNT_HUB_LEFTOVER_HINT,
+        })
+      }
+      continue
+    }
+    if (entry.startsWith('dsh-account-hub_tmp_')) {
+      items.push({
+        kind: 'tmp-dir',
+        path: join(nodeModulesPath, entry),
+        hint: ACCOUNT_HUB_LEFTOVER_HINT,
+      })
+    }
+  }
+  return { items }
 }
 
 interface AllowBuildsSection {
@@ -517,7 +572,7 @@ async function applyAccountHubUpdateLocked(
   const lockPath = join(deps.profileRoot, 'pnpm-lock.yaml')
   const lockfile = await deps.readFile(lockPath)
   const previousSha = findAccountHubSha(lockfile) ?? ''
-  if (targetSha === undefined && previousSha !== '' && installSha === previousSha) return { previousSha, currentSha: previousSha, log: '' }
+  if (targetSha === undefined && previousSha !== '' && installSha === previousSha) return { previousSha, currentSha: previousSha, log: '', restartRequired: true }
 
   const packagePath = join(deps.profileRoot, 'package.json')
   const workspacePath = join(deps.profileRoot, 'pnpm-workspace.yaml')
@@ -595,7 +650,7 @@ async function applyAccountHubUpdateLocked(
   } catch (error) {
     console.warn(`[account-hub] 清理旧 allowBuilds 条目失败：${errorMessage(error)}`)
   }
-  return { previousSha, currentSha, log }
+  return { previousSha, currentSha, log, restartRequired: true }
 }
 
 async function restoreAccountHubSnapshots(

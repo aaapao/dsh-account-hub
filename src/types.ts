@@ -533,6 +533,21 @@ export interface RpcUpdateCheckRequest {
   channel?: RpcUpdateChannel
 }
 
+/** 更新残留的具体类型。 */
+export type RpcUpdateLeftoverKind = 'incomplete-package' | 'tmp-dir'
+
+/** 更新中断后残留条目的只读诊断项。 */
+export interface RpcUpdateLeftoverItem {
+  kind: RpcUpdateLeftoverKind
+  path: string
+  hint: string
+}
+
+/** RPC: 更新中断残留诊断报告。 */
+export interface RpcUpdateLeftoverReport {
+  items: RpcUpdateLeftoverItem[]
+}
+
 /** RPC: `update.check` 响应。 */
 export interface RpcUpdateCheckResponse {
   currentSha: string
@@ -550,6 +565,8 @@ export interface RpcUpdateCheckResponse {
   changelog: string
   /** 当前版本日志：stable 为当前 Release，beta 为自最新 Release 以来的提交。 */
   currentChangelog: string
+  /** 半卸载状态下发现的更新残留；无残留或非半卸载状态时省略。 */
+  leftovers?: RpcUpdateLeftoverReport
 }
 
 /** RPC: `update.apply` 请求；channel 缺省为 stable。 */

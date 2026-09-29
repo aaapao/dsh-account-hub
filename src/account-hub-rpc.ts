@@ -9,6 +9,7 @@
  *           account.reset / account.resetAll / login.poll /
  *           credits.status / credits.claimAll / credits.balances /
  *           credits.checkinStatus / checkin.perform / checkin.sweep /
+ *           update.check / update.leftovers / update.apply / update.status /
  *           consumption.get / consumption.set /
  *           autoroute.get / autoroute.set / autoroute.catalog / autoroute.model-info /
  *           masquerade.status / masquerade.apply /
@@ -133,6 +134,7 @@ import type {
   RpcUpdateCheckResponse,
   RpcUpdateApplyResponse,
   RpcUpdateStatusResponse,
+  RpcUpdateLeftoverReport,
   RpcUpdateChannel,
   RpcMasqueradeRequest,
   RpcMasqueradeResponse,
@@ -141,6 +143,7 @@ import { AUTO_ROUTE_PROVIDER_ID, type AutoRouteDefinition } from './auto-route.j
 import {
   applyAccountHubUpdate,
   checkAccountHubUpdate,
+  detectAccountHubUpdateLeftovers,
   lastAccountHubApplyResult,
   type AccountHubUpdateDeps,
 } from './account-hub-update.js'
@@ -2010,6 +2013,12 @@ function registerAccountHubEndpoints(options: AccountHubRpcOptions): void {
         const channel = normalizeUpdateChannel(payload)
         if (options.updateDeps === undefined) throw new Error('Account Hub 更新功能未初始化')
         const value: RpcUpdateCheckResponse = await checkAccountHubUpdate(options.updateDeps, channel)
+        return { ok: true, value }
+      }
+
+      case 'update.leftovers': {
+        if (options.updateDeps === undefined) throw new Error('Account Hub 更新功能未初始化')
+        const value: RpcUpdateLeftoverReport = await detectAccountHubUpdateLeftovers(options.updateDeps)
         return { ok: true, value }
       }
 
