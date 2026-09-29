@@ -8,6 +8,8 @@ type AccountHubUpdateProgress = (
   detail: string,
 ) => void
 
+type AccountHubUpdateSnapshot = readonly [path: string, content: string]
+
 const NOOP_ACCOUNT_HUB_UPDATE_PROGRESS: AccountHubUpdateProgress = () => {}
 
 const RELEASES_LATEST_URL = 'https://api.github.com/repos/gurio-wine/dsh-account-hub/releases/latest'
@@ -513,12 +515,19 @@ async function applyAccountHubUpdateLocked(
     ? (await fetchLatestVersion(deps, channel)).sha
     : normalizeTargetSha(targetSha)
   const lockPath = join(deps.profileRoot, 'pnpm-lock.yaml')
-  const previousSha = findAccountHubSha(await deps.readFile(lockPath)) ?? ''
+  const lockfile = await deps.readFile(lockPath)
+  const previousSha = findAccountHubSha(lockfile) ?? ''
   if (targetSha === undefined && previousSha !== '' && installSha === previousSha) return { previousSha, currentSha: previousSha, log: '' }
 
   const packagePath = join(deps.profileRoot, 'package.json')
   const workspacePath = join(deps.profileRoot, 'pnpm-workspace.yaml')
   const packageJson = await deps.readFile(packagePath)
+  const workspace = await deps.readFile(workspacePath)
+  const snapshots: AccountHubUpdateSnapshot[] = [
+    [lockPath, lockfile],
+    [packagePath, packageJson],
+    [workspacePath, workspace],
+  ]
   const hasAccountHubDependency = /"dsh-account-hub"\s*:/.test(packageJson)
   const execOptions = {
     cwd: deps.profileRoot,
@@ -526,53 +535,59 @@ async function applyAccountHubUpdateLocked(
   }
 
   let removeLog = ''
-  if (hasAccountHubDependency) {
-    onProgress('removing', '正在卸载旧版本…')
-    let removeOutput: AccountHubUpdateProcessOutput
+  let addOutput: AccountHubUpdateProcessOutput
+  let currentSha: string
+  let log = ''
+  try {
+    if (hasAccountHubDependency) {
+      onProgress('removing', '正在卸载旧版本…')
+      let removeOutput: AccountHubUpdateProcessOutput
+      try {
+        removeOutput = await deps.exec(
+          'pnpm',
+          ['remove', 'dsh-account-hub'],
+          withOutputProgress(execOptions, 'removing', onProgress),
+        )
+      } catch (error) {
+        throwWithLog(error, formatInstallLog(processOutputFromError(error)))
+      }
+      removeLog = formatInstallLog(removeOutput)
+    }
+
+    // pnpm remove 会删除 package.json 中的依赖字段，pnpm add 本身会写入带 SHA 的 pin；
+    // 手工再写 pin 不仅冗余，还会在 remove 之后因字段不存在而必然失败。
+    const updatedWorkspace = appendAccountHubAllowBuild(workspace, installSha)
+    if (updatedWorkspace !== workspace) await deps.writeFile(workspacePath, updatedWorkspace)
+
+    onProgress('installing', '正在安装新版本…')
     try {
-      removeOutput = await deps.exec(
+      addOutput = await deps.exec(
         'pnpm',
-        ['remove', 'dsh-account-hub'],
-        withOutputProgress(execOptions, 'removing', onProgress),
+        ['add', `${ACCOUNT_HUB_GITHUB_PIN}#${installSha}`, '--config.minimum-release-age=0'],
+        withOutputProgress(execOptions, 'installing', onProgress),
       )
     } catch (error) {
-      throwWithLog(error, formatInstallLog(processOutputFromError(error)))
+      throwWithLog(error, joinInstallLogs(removeLog, formatInstallLog(processOutputFromError(error))))
     }
-    removeLog = formatInstallLog(removeOutput)
-  }
+    log = joinInstallLogs(removeLog, formatInstallLog(addOutput))
 
-  // pnpm remove 会删除 package.json 中的依赖字段，pnpm add 本身会写入带 SHA 的 pin；
-  // 手工再写 pin 不仅冗余，还会在 remove 之后因字段不存在而必然失败。
-  const workspace = await deps.readFile(workspacePath)
-  const updatedWorkspace = appendAccountHubAllowBuild(workspace, installSha)
-  if (updatedWorkspace !== workspace) await deps.writeFile(workspacePath, updatedWorkspace)
-
-  let addOutput: AccountHubUpdateProcessOutput
-  onProgress('installing', '正在安装新版本…')
-  try {
-    addOutput = await deps.exec(
-      'pnpm',
-      ['add', `${ACCOUNT_HUB_GITHUB_PIN}#${installSha}`, '--config.minimum-release-age=0'],
-      withOutputProgress(execOptions, 'installing', onProgress),
-    )
+    onProgress('verifying', '正在验证安装…')
+    try {
+      currentSha = extractAccountHubSha(await deps.readFile(lockPath))
+    } catch (error) {
+      throwWithLog(error, log)
+    }
+    if (currentSha !== installSha) {
+      throwWithLog(
+        new Error(`更新后 lockfile 未切换到最新版本（期望 ${installSha}，实际 ${currentSha}）`),
+        log,
+      )
+    }
   } catch (error) {
-    throwWithLog(error, joinInstallLogs(removeLog, formatInstallLog(processOutputFromError(error))))
+    await restoreAccountHubSnapshots(deps, snapshots)
+    throw error
   }
-  const log = joinInstallLogs(removeLog, formatInstallLog(addOutput))
 
-  let currentSha: string
-  onProgress('verifying', '正在验证安装…')
-  try {
-    currentSha = extractAccountHubSha(await deps.readFile(lockPath))
-  } catch (error) {
-    throwWithLog(error, log)
-  }
-  if (currentSha !== installSha) {
-    throwWithLog(
-      new Error(`更新后 lockfile 未切换到最新版本（期望 ${installSha}，实际 ${currentSha}）`),
-      log,
-    )
-  }
   try {
     const installedWorkspace = await deps.readFile(workspacePath)
     const cleanedWorkspace = removeStaleAllowBuildEntries(installedWorkspace, currentSha)
@@ -581,6 +596,20 @@ async function applyAccountHubUpdateLocked(
     console.warn(`[account-hub] 清理旧 allowBuilds 条目失败：${errorMessage(error)}`)
   }
   return { previousSha, currentSha, log }
+}
+
+async function restoreAccountHubSnapshots(
+  deps: AccountHubUpdateDeps,
+  snapshots: readonly AccountHubUpdateSnapshot[],
+): Promise<void> {
+  for (const [path, snapshot] of snapshots) {
+    try {
+      const current = await deps.readFile(path)
+      if (current !== snapshot) await deps.writeFile(path, snapshot)
+    } catch (error) {
+      console.error(`[account-hub] 回滚文件失败（${path}）：${errorMessage(error)}`)
+    }
+  }
 }
 
 function withOutputProgress(

@@ -944,4 +944,97 @@ describe('Account Hub 更新 RPC 逻辑', () => {
       'Command timed out (code ETIMEDOUT)\n\nstdout:\ntimeout stdout\nstderr:\ntimeout stderr',
     )
   })
+
+  it('add 失败且中途改写三个文件时恢复全部快照并保留原安装错误与日志', async () => {
+    const failure = Object.assign(new Error('pnpm add failed'), {
+      code: 1,
+      stdout: 'add stdout',
+      stderr: 'add stderr',
+    })
+    const initialLockfile = makeLockfile(CURRENT_SHA)
+    const initialPackageJson = makePackageJson()
+    const initialWorkspace = 'allowBuilds:\n  esbuild: true\n'
+    const { deps, files, exec } = makeDeps({
+      lockfile: initialLockfile,
+      packageJson: initialPackageJson,
+      workspace: initialWorkspace,
+      exec: async (_command, args) => {
+        if (args[0] === 'remove') {
+          files.set(PACKAGE_PATH, '{"name":"changed-by-remove"}\n')
+          return { stdout: 'remove stdout', stderr: 'remove stderr' }
+        }
+        files.set(LOCK_PATH, makeLockfile(LATEST_SHA))
+        files.set(PACKAGE_PATH, makePackageJson(`${ACCOUNT_HUB_PIN}#${LATEST_SHA}`))
+        files.set(WORKSPACE_PATH, 'allowBuilds:\n  changed: true\n')
+        throw failure
+      },
+    })
+
+    await expect(applyAccountHubUpdate(deps)).rejects.toThrow(
+      'pnpm add failed (code 1)\n\nstdout:\nremove stdout\nstderr:\nremove stderr\nstdout:\nadd stdout\nstderr:\nadd stderr',
+    )
+    expect(files.get(LOCK_PATH)).toBe(initialLockfile)
+    expect(files.get(PACKAGE_PATH)).toBe(initialPackageJson)
+    expect(files.get(WORKSPACE_PATH)).toBe(initialWorkspace)
+    expect(exec).toHaveBeenCalledTimes(2)
+  })
+
+  it('remove 失败时不发生任何快照回写', async () => {
+    const failure = Object.assign(new Error('pnpm remove failed'), {
+      code: 1,
+      stdout: 'remove stdout',
+      stderr: 'remove stderr',
+    })
+    const { deps, exec } = makeDeps({ exec: async () => { throw failure } })
+
+    await expect(applyAccountHubUpdate(deps)).rejects.toThrow('pnpm remove failed')
+    expect(deps.writeFile).not.toHaveBeenCalled()
+    expect(exec).toHaveBeenCalledTimes(1)
+  })
+
+  it('快照恢复的 writeFile 失败时仍抛原安装错误并记录 console.error', async () => {
+    const failure = Object.assign(new Error('pnpm add failed'), {
+      code: 1,
+      stdout: 'add stdout',
+      stderr: 'add stderr',
+    })
+    const { deps, files } = makeDeps({
+      exec: async (_command, args) => {
+        if (args[0] === 'remove') return { stdout: 'remove stdout', stderr: 'remove stderr' }
+        files.set(LOCK_PATH, makeLockfile(LATEST_SHA))
+        throw failure
+      },
+    })
+    const originalWriteFile = deps.writeFile
+    const writeFailure = new Error('snapshot write failed')
+    deps.writeFile = async (path, content) => {
+      if (path === LOCK_PATH) throw writeFailure
+      await originalWriteFile(path, content)
+    }
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      await expect(applyAccountHubUpdate(deps)).rejects.toThrow(
+        'pnpm add failed (code 1)\n\nstdout:\nremove stdout\nstderr:\nremove stderr\nstdout:\nadd stdout\nstderr:\nadd stderr',
+      )
+      expect(error).toHaveBeenCalledWith(expect.stringContaining('回滚文件失败'))
+    } finally {
+      error.mockRestore()
+    }
+  })
+
+  it('成功路径只写入 allowBuilds 业务变更，不发生快照回写', async () => {
+    const { deps, files } = makeDeps()
+    const originalWriteFile = deps.writeFile
+    const writes: Array<[string, string]> = []
+    deps.writeFile = async (path, content) => {
+      writes.push([path, content])
+      await originalWriteFile(path, content)
+    }
+
+    await applyAccountHubUpdate(deps)
+
+    expect(writes).toHaveLength(1)
+    expect(writes[0]?.[0]).toBe(WORKSPACE_PATH)
+    expect(writes[0]?.[1]).toContain(`dsh-account-hub@https://codeload.github.com/gurio-wine/dsh-account-hub/tar.gz/${LATEST_SHA}: true`)
+  })
 })
