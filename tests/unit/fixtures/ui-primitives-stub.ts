@@ -56,13 +56,14 @@ const SPECIFIER = '@deepseek-ai/dsh-client-ui-primitives'
 /**
  * 宿主 checkout 读不到时的**最小手工兜底名单**。
  *
- * 只列本仓库当前真正导入的三个图标（新名）—— 兜底只需够跑通既有 spec，
+ * 只列本仓库当前真正导入的四个图标（新名）—— 兜底只需够跑通既有 spec，
  * 它**不是**真相源：真相源是宿主导出现算，手工名单一旦被当真就会重演旧名事故。
  */
 const FALLBACK_ICON_NAMES = [
   'IconApiOutlineRegular',
   'IconBranchOutlineRegular',
   'IconChevronDownOutlineRegular',
+  'IconPlusOutlineRegular',
 ]
 
 /**
@@ -329,7 +330,7 @@ exports.DisclosureRow = function DisclosureRow(props) {
 /**
  * 图标替身源码：**按宿主导出现算**逐个生成，每个 `Icon*` 都是一枚不渲染的占位组件。
  *
- * 手工维护这三个名字正是本次白屏事故的成因（见文件头）：宿主改名后，手工名单
+ * 手工维护这四个名字正是本次白屏事故的成因（见文件头）：宿主改名后，手工名单
  * 与插件源码**同时**停留在旧名上，两边自洽、测试全绿。改成现算后，只要插件还在
  * 引用宿主已不存在的名字，`rewriteUiPrimitivesImport` 的核对就当场抛错。
  *

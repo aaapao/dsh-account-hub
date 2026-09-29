@@ -1298,6 +1298,79 @@ describe('AutoRoutePanel：思考档位（按需拉取 + 缓存）', () => {
     expect(afterReset.originator, '重置后 originator 键应当消失（不是空串）').toBeUndefined()
     expect(afterReset.effort, '重置 Originator 不影响 effort').toBe('high')
   })
+
+  it('选「关闭」清掉候选级客户端伪装三字段，重挂载后仍显示关闭', async () => {
+    type MasqueradeFixture = {
+      enabled: boolean
+      models: Array<{
+        id: string
+        name: string
+        entries: Array<{
+          provider: string
+          model: string
+          effort?: string
+          userAgent?: string
+          originator?: string
+          masquerade?: { windowId: string }
+        }>
+      }>
+    }
+
+    const fixture = JSON.parse(JSON.stringify(CONFIG)) as MasqueradeFixture
+    fixture.models[0]!.entries[0] = {
+      ...fixture.models[0]!.entries[0],
+      userAgent: 'other-definition-user-agent',
+      originator: 'other-definition-originator',
+      masquerade: { windowId: 'other-definition-window' },
+    }
+    fixture.models[1]!.entries[0] = {
+      ...fixture.models[1]!.entries[0],
+      userAgent: 'same-definition-user-agent',
+      originator: 'same-definition-originator',
+      masquerade: { windowId: 'same-definition-window' },
+    }
+    // 目标固定为 models[1].entries[1]；保留原有 effort，另外三项作为待清除哨兵。
+    fixture.models[1]!.entries[1] = {
+      ...fixture.models[1]!.entries[1],
+      userAgent: 'target-user-agent',
+      originator: 'target-originator',
+      masquerade: { windowId: 'target-window' },
+    }
+
+    const { calls, rpcCall } = makeRpc({ config: fixture as typeof CONFIG })
+    let tree = await settle(client.AutoRoutePanel, panelProps(rpcCall), client.hooks, true)
+    tree = await openEditor(tree, rpcCall, 1, 1)
+
+    // 第四个下拉是「客户端伪装」；空串是「关闭」哨兵值，不是要写入配置的字符串。
+    selectInMenu(editorMenus(tree)[3]!, '')
+    tree = await settle(client.AutoRoutePanel, panelProps(rpcCall), client.hooks)
+
+    const sets = calls.filter((call) => call.method === 'autoroute.set')
+    expect(sets, '选择客户端伪装「关闭」应当只提交一次').toHaveLength(1)
+    expect(Object.keys(sets[0]!.payload), '候选编辑提交载荷只能包含 models').toEqual(['models'])
+
+    const payload = sets[0]!.payload as { models: MasqueradeFixture['models'] }
+    const target = payload.models[1]!.entries[1]!
+    expect(target, '目标候选应保留 provider、model 与 effort').toStrictEqual({
+      provider: 'codearts',
+      model: 'glm-5',
+      effort: 'high',
+    })
+    for (const field of ['userAgent', 'originator', 'masquerade'] as const) {
+      expect(Object.prototype.hasOwnProperty.call(target, field), `${field} 键必须被摘掉`).toBe(false)
+    }
+    expect(payload.models[1]!.entries[0], '同定义其它候选必须原样保留')
+      .toStrictEqual(fixture.models[1]!.entries[0])
+    expect(payload.models[0], '其它定义必须原样保留').toStrictEqual(fixture.models[0])
+
+    // 同一 rpcCall 的当前配置已被 set 更新；reset=true 模拟组件重挂载，再确认关闭态来自持久化结果。
+    tree = await settle(client.AutoRoutePanel, panelProps(rpcCall), client.hooks, true)
+    tree = await openEditor(tree, rpcCall, 1, 1)
+    expect(editorMenus(tree)[3]!.menuProps!.selectedId, '重挂载后关闭态不应有选中 id').toBeUndefined()
+    const editorTexts = textsOf(editorRoot(tree)!)
+    expect(editorTexts.some((text) => text === '默认关闭（不伪装）' || text === '关闭'),
+      '重挂载后的编辑器应显示客户端伪装关闭文案').toBe(true)
+  })
 })
 
 describe('AutoRoutePanel：自动保存流（修改即保存）', () => {

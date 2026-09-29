@@ -1402,7 +1402,8 @@ export function apply(ctx: Context, config?: Config): void {
   // 下一轮目录刷新就该看到，不存在「忘了重建」的窗口。运行时（降级队列）不能现读
   // （它有状态），故由刷新函数按**内容指纹**决定何时重建。
   const ensureAutoRouteRegistration = createAutoRouteRegistration(ctx, () => pool.autoRouteConfig())
-  // 兜底：剥掉打到聚合模型的会话侧档位（详见 `installAutoRouteEffortGuard` 的说明）。
+  // 兜底：按当前聚合模型能力校验会话侧档位，仅清理明确失配的历史残留；无法确认时只告警并保留档位
+  //（详见 `installAutoRouteEffortGuard` 的说明）。合法档位必须保留。
   // 挂在这里而不是适配器里，是因为宿主的档位校验发生在**适配器之前**（实测
   // `adapter.stream()` 根本不会被调用），`agent/request` 是唯一能改变校验前配置的
   // 可挂点。它**不依赖总开关**：注册一次即可，命中判据自带 provider 过滤。

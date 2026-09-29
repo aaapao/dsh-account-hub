@@ -328,7 +328,23 @@ export class AutoRouteAdapter extends LlmAdapter {
       const entry = autoRouteHead(this.runtime, definition.id)
       // 队首为 null = 该定义没有任何候选（未经 sanitize 的手工定义才会出现）。
       if (entry === null) break
-      const forwarded = forwardOptions(options, entry)
+      // 这是能力预检，不是一次额外的路由解析：entry.effort 或调用方档位任一存在时，
+      // 都要按这一轮的当前队首目标校验。预检失败时必须保留 entry.effort / 调用方档位，
+      // 让真实的目标 `ctx.llm.stream()` 继续产生原有的失败 chunk，降级拓扑不变。
+      // 只有预检成功，`forwardOptions` 才会剥掉失配值，并只保留目标已验证的档位。
+      let targetCapability: TargetCapabilityProbe | undefined
+      if (entry.effort !== undefined || options.reasoningEffort !== undefined) {
+        try {
+          targetCapability = {
+            status: 'resolved',
+            info: await this.options.ctx.llm.resolveModelInfo(entry.provider, entry.model, options.signal),
+          }
+        } catch {
+          targetCapability = { status: 'failed' }
+          // 查询失败不改变降级拓扑；真实转发负责暴露错误。
+        }
+      }
+      const forwarded = forwardOptions(options, entry, targetCapability)
       // 伪装运输层：载荷**与 forwarded 上那三个载体字段同源** —— 都由这一条 entry
       // 归一化而来（三者全空 ⇒ `undefined` ⇒ 整条伪装路径不走，见
       // {@link masqueradePayloadOf}）。
@@ -416,15 +432,11 @@ export class AutoRouteAdapter extends LlmAdapter {
  * ## 逐字段语义
  *
  * - `provider` / `model`：换成队首条目的目标。
- * - `reasoningEffort`：条目**配了**档位就用条目的（自动模型 = provider + model +
- *   effort 的打包语义）；**没配**就什么都不写 —— `...options` 已经带着调用方的值，
- *   写一个 `undefined` 会**覆盖掉**它。条目仍是实际请求档位的优先来源。
- *
- *   真实 agent 会话路径由 {@link installAutoRouteEffortGuard} 先移除会话侧残留或
- *   物化的聚合默认档位：有 `entry.effort` 时转发它，缺失时让目标 provider 自己
- *   物化默认档。保留这里的透传形态而不是写死 `entry.effort`，是为了让**直接调
- *   适配器**的场景（测试、未来的外部调用方）继续保持「条目优先、调用方兜底」语义，
- *   不静默丢弃调用方的显式选择。
+ * - `reasoningEffort`：条目**配了**档位时，真实自动路由请求会先用当前目标的
+ *   `resolveModelInfo` 校验它；合法才注入条目档位。若条目档位已不在目标当前能力里，
+ *   不注入该条目值，并在目标能力允许时保留调用方已经带来的合法值，否则让目标 provider
+ *   自己物化默认档。能力预检只存在于异步的真实请求路径；没有预检能力的**直接调适配器**
+ *   仍保持既有「条目有值优先、条目缺省时保留调用方值」语义。
  * - `messages`：必须走 {@link rewriteMessagesForTarget}（replayState 归属检查，
  *   见那里的说明）。请求对象与其 `messages` 都是**深冻结**的，故这里 `map` 出新
  *   数组、浅拷贝出新对象，绝不原地改。
@@ -457,17 +469,61 @@ export class AutoRouteAdapter extends LlmAdapter {
  *   `{ windowId }`，且载体形状**直接引用** `AutoRouteMasquerade`（见
  *   {@link AccountHubMasqueradeCarrier}）—— 形状一旦分叉不会有任何编译期报错。
  */
-function forwardOptions(options: GenerateOptions, entry: AutoRouteEntry): GenerateOptions {
+type TargetCapabilityProbe =
+  | { status: 'resolved'; info: LlmResolvedModelInfo }
+  | { status: 'failed' }
+
+function forwardOptions(
+  options: GenerateOptions,
+  entry: AutoRouteEntry,
+  target?: TargetCapabilityProbe,
+): GenerateOptions {
+  // `target` 缺省 = 没有能力预检：直接调适配器时保持「entry 有值优先、缺省时保留
+  // 调用方值」的旧语义；真实请求的预检失败则同样保留 entry.effort / 调用方值，让目标
+  // 解析 / stream 继续产生原有错误并由外层降级。只有预检成功才检查 entry 与调用方档位：
+  // entry 合法覆盖调用方；entry 失配或缺省时，仅保留目标能力验证过的调用方值。
+  const { reasoningEffort: callerEffort, ...optionsWithoutEffort } = options
+  let base = options
+  let effort: ReasoningEffortId | undefined
+  if (entry.effort !== undefined) {
+    if (target === undefined || target.status === 'failed') {
+      // 预检失败不改变既有转发 / 降级拓扑，仍按旧语义注入 entry.effort。
+      effort = ReasoningEffortId(entry.effort)
+    } else if (reasoningEffortSupported(target.info, entry.effort)) {
+      // 当前目标接受条目档位：条目值优先，覆盖调用方值。
+      effort = ReasoningEffortId(entry.effort)
+    } else {
+      // 当前目标不接受条目档位：不夹带非法 entry；调用方值只有经同一目标能力
+      // 验证后才可通过，否则连同 entry 一起省略，让目标自己物化默认。
+      base = optionsWithoutEffort
+      if (callerEffort !== undefined && reasoningEffortSupported(target.info, callerEffort)) {
+        effort = callerEffort
+      }
+    }
+  } else if (target?.status === 'resolved') {
+    // entry 没配档位但真实请求完成了能力预检：同样不能把未经当前目标验证的 caller
+    // 值送给队首。先摘掉原值，再只恢复目标明确支持的 caller 档位；无效值由目标默认。
+    base = optionsWithoutEffort
+    if (callerEffort !== undefined && reasoningEffortSupported(target.info, callerEffort)) {
+      effort = callerEffort
+    }
+  }
   return {
-    ...options,
+    ...base,
     provider: entry.provider,
     model: entry.model,
     messages: rewriteMessagesForTarget(options.messages, entry.provider),
-    ...entry.effort === undefined ? {} : { reasoningEffort: ReasoningEffortId(entry.effort) },
+    ...effort === undefined ? {} : { reasoningEffort: effort },
     ...entry.userAgent === undefined ? {} : { accountHubUserAgent: entry.userAgent },
     ...entry.originator === undefined ? {} : { accountHubOriginator: entry.originator },
     ...entry.masquerade === undefined ? {} : { accountHubMasquerade: entry.masquerade },
   }
+}
+
+/** 判断目标当前能力是否确实接受一个条目档位。 */
+function reasoningEffortSupported(target: LlmResolvedModelInfo, effort: string): boolean {
+  const efforts = target.reasoning?.efforts
+  return Array.isArray(efforts) && efforts.some((candidate) => candidate.id === effort)
 }
 
 /**
@@ -673,12 +729,14 @@ export function createAutoRouteRegistration(
 }
 
 /**
- * 在 `agent/request` 瀑布流上兜底剥掉打到聚合模型的 `reasoningEffort`。
+ * 在 `agent/request` 瀑布流上兜底校验打到聚合模型的 `reasoningEffort`。
  *
- * ## 为什么需要它（宿主在**到达适配器之前**就拒）
+ * ## 为什么需要它（宿主在**到达适配器之前**就校验）
  *
- * 聚合模型不声明 `reasoning`（见 {@link AutoRouteAdapter.resolveModel}），而宿主的
- * `resolveCallWithInfo` 对「无声明 + 请求带档位」是**硬拒**：
+ * 聚合模型现在按当前队首目标声明 `reasoning.efforts`（见
+ * {@link AutoRouteAdapter.resolveModel}），而宿主的 `resolveCallWithInfo` 会对请求档位
+ * 做硬校验。监听器必须以**同一份当前能力**为准：仍合法的用户选择不能被抹掉，失配的
+ * 历史残留或过期值才需要止损剥除：
  *
  * ```text
  * reasoning === undefined && requested !== undefined → UNSUPPORTED_REASONING_EFFORT
@@ -691,26 +749,22 @@ export function createAutoRouteRegistration(
  *
  * ## 谁会带着档位打过来
  *
- * 升级前用过自动路由、并在会话侧显式选过档位的历史会话：档位被持久化在
+ * 一部分请求来自升级前用过自动路由、并在会话侧显式选过档位的历史会话：档位被持久化在
  * `model/selection` 或 request header 的 `config.reasoningEffort` 上，恢复时由
- * `agent.ts` 的 `persistedReasoningEffort` 还原。用户此时**没有任何界面手段**把这个
- * 残留值清掉（档位下拉已经不存在了），故不做兜底就等于让这些会话**永久报错**。
+ * `agent.ts` 的 `persistedReasoningEffort` 还原。也可能是当前聚合能力中仍合法的选择，
+ * 因此不能再按 provider 直接无条件删除；只对当前 `resolveModelInfo` 仍不接受的值止损。
  *
  * ## 为什么挂在这里，而不是适配器 `stream()` 入口
  *
- * 因为那是**死代码**，而且**有害**（两条都实测过）：
+ * 适配器入口的**无条件剥键**不能替代这里的宿主校验前处理：档位校验在
+ * `resolveCallWithInfo`（`dsh-llm/lib/index.js`），发生在适配器真正 dispatch 之前；
+ * `agent/request` 是唯一能在校验前修正会话配置的挂点。真实 `AutoRouteAdapter.stream()`
+ * 仍会在已经进入适配器的请求上做当前目标能力预检，但那是另一条更晚的转发保护，不能
+ * 修复宿主校验前的会话残留，也不能替代直接调适配器所依赖的 `forwardOptions` 兼容语义。
  *
- * 1. **执行不到**：档位校验在 `resolveCallWithInfo`（`dsh-llm/lib/index.js:1561-1586`），
- *    发生在适配器被调用**之前**（`prepareCall` `:1599` 校验、`:1621` 才接上
- *    `adapterCall.stream`）。三条宿主路径实测 `adapter.stream()` 调用数**全为 0**：
- *    `resolveCallConfig` 带档位 → 抛；`ctx.llm.stream` 带档位 → 终止 chunk 报错；
- *    `prepareCall` 带档位 → 抛。
- * 2. **有害**：直接调适配器的场景（测试、未来的外部调用方）依赖「条目没配档位时
- *    **不写**该键 ⇒ 调用方带来的值原样透传」。入口剥键会把那个值静默清掉 —— 实测
- *    加上它会让转发语义用例变红。故刻意不实现，并由一条反面判据用例钉住。
- *
- * 而 `agent/request` 在 `prepareRequest` 里**早于 `prepareCall`**（`agent.ts:531`
- * 派发 vs `:542` 校验），是唯一能改变「校验前配置」的可挂点。
+ * 直接调适配器的场景（测试、未来的外部调用方）不经过这里，且依赖 `forwardOptions`
+ * 在条目缺省档位时保留调用方值。这里不能猜测或反向改写直调路径，其边界仍是
+ * `agent/request`。
  *
  * ## 作用域：根级监听器可达，但仍显式带 `{ global: true }`
  *
@@ -722,17 +776,16 @@ export function createAutoRouteRegistration(
  *
  * ## 覆盖面边界（刻意接受）
  *
- * 它只覆盖 agent 会话路径。`llm.resolveCallConfig` 的两条**直调**路径
- * （面板 `session.selectModel`、子代理 `preflightChildLlmRoute`）是直接方法调用、
- * 无事件可挂，仍会报 `UNSUPPORTED_REASONING_EFFORT`。这是刻意的：那两条是用户
- * **显式选了档位**的动作，报错比静默丢弃他的选择更诚实。其他插件对 `ctx.llm.stream()`
- * 的直调（`session-title-llm` 等）同样绕开这里，但它们目前都不带档位。
+ * 它只覆盖 agent 会话路径。`llm.resolveCallConfig` 的直调路径（面板选择、子代理预检等）
+ * 是直接方法调用、无事件可挂，仍由宿主按当前聚合能力自行校验；其他插件对
+ * `ctx.llm.stream()` 的直调同样绕开这里。直调绕过 agent/request 是本切片的非目标边界，
+ * 不猜测私有 API，也不新增反向 RPC。
  *
- * ## 处置：warn 一次 + 剥键，不打死
+ * ## 处置：合法保留；明确失配时 warn 一次 + 剥键，未知时保留
  *
- * 剥掉键之后这一轮照常按**条目档位**转发（没配就是目标自己的默认档），语义与
- * 「档位唯一归属条目」完全一致。warn **按定义去重**（同一 provider/model 只报一次）：
- * 残留值会在每一步都出现，每步一条会把日志刷满，反而淹没了真正的信号。
+ * 能力查询成功且当前 `efforts` 缺失、为空或不包含请求值时，才确认失配并删除该键；
+ * 能力查询失败只能说明暂时无法判断，守卫只 warn 并保留用户选择。warn **按定义去重**
+ * （同一 provider/model 只报一次），避免历史残留在每一步刷满日志。
  *
  * @param ctx - 宿主上下文（注册 `agent/request` 监听器）。
  * @returns 注销函数。
@@ -751,21 +804,34 @@ export function installAutoRouteEffortGuard(ctx: Context): () => void {
     if (resolved.provider !== AUTO_ROUTE_PROVIDER_ID) return resolved
     const effort = resolved.reasoningEffort
     if (effort === undefined) return resolved
+
     const key = `${resolved.provider}/${resolved.model}`
-    if (!warned.has(key)) {
+    const warnOnce = (message: string): void => {
+      if (warned.has(key)) return
       warned.add(key)
-      ctx.logger?.warn?.(
-        `[account-hub] 自动路由模型 ${key} 收到会话侧思考档位 "${String(effort)}"，已忽略`
-        + '（聚合模型不声明档位；档位在面板条目上配置，想要不同档位请建多个自动模型）',
-      )
+      ctx.logger?.warn?.(`[account-hub] 自动路由模型 ${key} ${message}`)
     }
-    // 剥键用**删除**而不是「置 undefined」。实测两种形态在本链路（`prepareCall` →
-    // `preparedCall.stream`）上**都能跑通**：宿主各处判据都是 `=== void 0`
-    // （`resolveCallWithInfo` 的 `requested !== void 0`、`prepareCall` 的
-    // `config.reasoningEffort === void 0`），故 undefined 与「键不存在」等效。
-    // 选删除是因为它语义更诚实（「这一轮压根没有档位这回事」，而非「有一个空的档位」），
-    // 且与宿主自己的写法一致（`agent-loop/agent.ts:66` 的 `requestProposal` 同样是
-    // `delete`）。这是**偏好，不是正确性要求** —— 别把它写成「置 undefined 会坏」。
+
+    let supported = false
+    try {
+      const current = await ctx.llm.resolveModelInfo(resolved.provider, resolved.model)
+      supported = reasoningEffortSupported(current, effort)
+    } catch {
+      // 能力解析失败只能说明「无法判断」，不能把未知状态当成明确失配而删除用户选择。
+      warnOnce(
+        `无法确认会话侧思考档位 "${String(effort)}" 是否受当前队首支持，暂时保留`
+        + '（请检查当前队首目标的 reasoning 能力；需要固定档位时请在自动路由条目配置）',
+      )
+      return { ...resolved }
+    }
+    if (supported) return { ...resolved }
+
+    warnOnce(
+      `收到当前能力不支持的会话侧思考档位 "${String(effort)}"，已忽略`
+      + '（请检查当前队首目标的 reasoning 能力；需要固定档位时请在自动路由条目配置）',
+    )
+    // 只有解析成功且明确失配时才剥键。删除而不是置 undefined 是语义偏好，不是正确性要求：
+    // 宿主各处判据都是 `=== void 0`，两种形态在本链路上等效；删除更准确表达本轮不带档位。
     const { reasoningEffort: _dropped, ...withoutEffort } = resolved
     return withoutEffort
   }, { global: true })

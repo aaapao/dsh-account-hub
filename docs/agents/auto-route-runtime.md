@@ -34,7 +34,7 @@ DSH 怎么看到这些自动模型、一次请求怎么被转发出去、失败�
 | 字段 | 取值 | 为什么 |
 |---|---|---|
 | `provider` / `model` | 队首条目的目标 | 自动模型就是一条有序候选列表 |
-| `reasoningEffort` | 条目**配了**就用条目的；**没配**则**不写该键**（不写 ≠ 写 `undefined`：后者会覆盖掉调用方给的值） | 自动模型 = provider + model + effort 的**打包**语义；档位唯一归属条目 |
+| `reasoningEffort` | 真实 `stream()` 路径先预检当前目标能力：条目档位合法时覆盖 caller；条目失配时不注入非法值，caller 仅在目标能力中合法时保留，否则不写并让目标默认物化；预检失败则保留旧 `entry.effort` 转发 | `entry.effort` 仍是候选实际档位与面板唯一编辑入口；没有预检能力的直接适配器调用维持条目优先、条目缺省时保留 caller |
 | `messages` | `rewriteMessagesForTarget(options.messages, entry.provider)` | 见 §3（不重写 = 思考模式工具轮 400） |
 
 **请求对象与其 `messages` 数组都是深冻结的**（宿主 `agent.ts`），故重写必须
@@ -255,66 +255,76 @@ provider 侧签名（Anthropic 的 `thinkingSignature` / DeepSeek Messages 的
 
 身份三元组必须换成本路由的（宿主 `normalizeModelInfo` 硬校验
 `resolved.provider === 路由名` 且 `resolved.id === 请求的模型名`，不符即抛
-`INVALID_MODEL_INFO`，整轮对话起不来）；能力里**只合并 `context` / `defaultMaxTokens`
-等不随档位争议的字段**，一律从**队首条目**的目标派生。
+`INVALID_MODEL_INFO`，整轮对话起不来）；能力字段一律从**队首条目**的目标派生：
+`context` / `defaultMaxTokens` 等直接保留，`reasoning` 则按当前目标的有效 `efforts`
+动态声明，绝不把备用候选能力合并进来。
 
-### 聚合模型**不声明 `reasoning`**（档位唯一归属条目）
+### `reasoning` 的动态聚合（只取当前队首，不聚合备用候选）
 
-即使队首目标有档位表，聚合模型也把 `reasoning` 整个丢掉（键都不留）⇒ **DSH 会话侧
-没有档位下拉**。档位的唯一归属是**面板里的条目**（`entry.effort`）：条目配了就在转发时
-注入（见 §2），没配就落目标模型自己的默认档。想要同一 provider/model 的不同档位，就在
-面板里建**多个自动模型**（一个条目一个档位）。
+`resolveModel()` 每次按当前队首条目调用 `ctx.llm.resolveModelInfo(entry.provider, entry.model)`，
+并将目标能力映射成本自动模型的能力声明。目标 `reasoning` 存在且 `efforts` 非空时，聚合模型
+声明**这一组当前有效档位**；目标没有有效档位表时才省略 `reasoning`。能力不会跨备用候选合并，
+也不会把非法的 `entry.effort` 伪装成聚合模型能力。队首因降级变化后，下一次 `resolveModel()`
+会重新读取新目标，因此声明可以随当前队首动态变化。
 
-会话侧那条下拉站不住的三个理由（用户定案）：
+`entry.effort` 仍是候选的实际档位，也是面板中编辑该档位的唯一入口，但它不对应新增的
+自动模型持久 reasoning 字段，也没有弹窗反向写回机制：
 
-1. **条目配了档位时它会被无视** —— 转发以条目为准，下拉选了也不生效。
-2. **没配时它只对队首有意义** —— 档位表来自队首目标，而队首会随降级漂移；用户在
-   `p-a` 的档位表上选的档，转发给 `p-b` 时未必存在。
-3. **档位失配会引发链式降级** —— 宿主在**到达本适配器之前**就按聚合模型声明的 efforts
-   校验（`resolveCallWithInfo`），选的档不在声明里就直接 `UNSUPPORTED_REASONING_EFFORT`，
-   整轮对话起不来。
-
-旧实现把目标的 `reasoning` 合并进来、并把 `entry.effort`（落在目标表里时）作为
-`defaultEffort` 透出 —— 那正是「会话侧可选档位」的来源，已整体移除。
-
-### 宿主校验与物化：两处实测结论（改动依据）
+1. `entry.effort` 落在当前目标 `reasoning.efforts` 中时，作为聚合模型的 `defaultEffort`，并在
+   真实转发预检成功时优先覆盖 caller 的 `reasoningEffort`。
+2. 条目没有档位，或条目档位不在当前目标能力中时，不把非法值写进聚合声明；聚合声明只在
+   目标仍有有效 `efforts` 时保留目标的档位列表。
+3. 条目档位非法或缺失时，只有目标自身仍落在 `efforts` 内的 `defaultEffort` 才作为默认值；
+   默认值缺失或失配则不声明 `defaultEffort`。因此不能据此推断宿主弹窗一定显示档位，
+   也不能把宿主侧选择理解为会写回自动路由条目。
 
 `dsh-llm@0.1.2-rc.1` 实测（真实 `LlmRuntime`，非读文档推断）：
 
 | 场景 | 宿主行为 |
 |---|---|
-| 聚合模型**无** `reasoning` 声明 + 请求**不带** `reasoningEffort` | 正常放行；`resolveCallWithInfo` **不物化**任何档位，转发请求里**没有该键** ⇒ 内层按**目标自己的声明**补目标默认档 |
-| 聚合模型**无** `reasoning` 声明 + 请求**带** `reasoningEffort` | 宿主在 `resolveCallWithInfo` 抛 `UNSUPPORTED_REASONING_EFFORT`（`reasoning === undefined && requested !== undefined`）——**发生在适配器 `stream()` 之前**（实测 `adapter.stream` 调用数 0） |
+| 当前队首目标没有有效 `reasoning.efforts` + 请求**不带** `reasoningEffort` | 聚合模型省略 `reasoning`，正常放行；宿主不物化档位，进入目标 provider 后由目标自己的声明决定默认档 |
+| 当前队首目标有非空 `efforts` + 请求**不带** `reasoningEffort` | 聚合模型声明当前目标的 `efforts`；若声明了有效 `defaultEffort`，宿主按其正常默认物化规则处理，否则不补默认值 |
+| 聚合模型声明 `reasoning` + 请求带当前 `efforts` 中的合法档位 | 宿主校验通过；agent 会话由守卫保留该 caller 值，随后 `stream()` 再按条目预检规则决定条目值或 caller 值 |
+| 聚合模型声明 `reasoning` + 请求带不在当前 `efforts` 中的档位 | 宿主在适配器 `stream()` 之前拒绝；agent 会话先由 `agent/request` 删除失配值，直调路径则保留宿主拒绝行为 |
+| 聚合模型**无** `reasoning` 声明 + 请求带 `reasoningEffort` | 宿主在 `resolveCallWithInfo` 抛 `UNSUPPORTED_REASONING_EFFORT`（`reasoning === undefined && requested !== undefined`），适配器不会被调用 |
 
-由此得出一条关键结论：**「在聚合适配器 `stream()` 入口剥掉 `reasoningEffort`」是死代码**
-（真实会话路径上根本走不到那里）。真实 agent 路径更早：`agent-loop/agent.ts` 的
-`llm.prepareCall()` 内部就抛，而其 catch 只放行 `NO_ADAPTER`，其余 rethrow ⇒ 整轮直接死。
+因此，`resolveModel()` 的能力声明与队首同步变化：有有效档位表时动态声明，目标没有有效
+档位表时才省略；不能把备用候选的能力拼入当前聚合模型，也不能把非法条目档位放进声明。
+宿主仍在进入适配器前校验请求档位，真实 agent 会话要在 `agent/request` 处处理历史残留或
+失配值；这不表示宿主弹窗一定显示档位，也不表示宿主侧选择会写回 `entry.effort`。
 
 三条宿主路径的实测（真实 `LlmRuntime`，记录 `adapter.stream()` 的调用次数）：
 
 | 路径 | 结果 | `adapter.stream()` 调用数 |
 |---|---|---|
-| `llm.resolveCallConfig` 带档位 | 抛 `UNSUPPORTED_REASONING_EFFORT` | **0** |
-| `ctx.llm.stream` 带档位 | 终止 chunk `finish:error:UNSUPPORTED_REASONING_EFFORT` | **0** |
-| `llm.prepareCall` 带档位 | 抛 `UNSUPPORTED_REASONING_EFFORT` | **0** |
+| `llm.resolveCallConfig` 带当前聚合声明支持的档位 | 校验通过；能力声明存在时按宿主规则处理 | **取决于后续调用** |
+| `llm.resolveCallConfig` 带失配档位 | 抛 `UNSUPPORTED_REASONING_EFFORT` | **0** |
+| `ctx.llm.stream` 带失配档位 | 终止 chunk `finish:error:UNSUPPORTED_REASONING_EFFORT` | **0** |
+| `llm.prepareCall` 带失配档位 | 抛 `UNSUPPORTED_REASONING_EFFORT` | **0** |
 
-调用数全为 0 是因为校验（`resolveCallWithInfo`，`dsh-llm/lib/index.js:1561-1586`）发生在
+调用数为 0 是因为失配校验（`resolveCallWithInfo`，`dsh-llm/lib/index.js:1561-1586`）发生在
 适配器被调用**之前**（`prepareCall` 在 `:1599` 校验、`:1621` 才把 `adapterCall.stream`
-接上）。故入口剥键**永远执行不到**。
+接上）。故在聚合适配器 `stream()` 入口剥除档位不能修复真实会话路径。
 
-而且它不只是无用、**还有害**：直接调适配器的场景（本仓的转发语义用例、未来的外部
-调用方）依赖「条目没配档位时**不写**该键 ⇒ 调用方带来的值原样透传」。入口剥键会把那个
-值静默清掉 —— 实测把该剥键加进 `stream()` 会让 `tests/unit/auto-route-adapter.spec.ts`
-的转发语义用例变红。该设计已被证伪并**刻意不实现**，由一条反面判据用例钉住。
+而且无条件入口剥键对直接调适配器的场景**还有害**：本仓的转发语义用例及未来外部调用方依赖
+`forwardOptions` 的无 probe 规则——条目档位优先，条目缺省时保留 caller 值。故不把无条件
+清理放进 `stream()`；真实 `stream()` 只在本次确实带有 entry/caller 档位时做目标能力预检，
+预检成功后按当前目标筛选，预检失败仍保留旧转发拓扑。`agent/request` 仍是宿主校验前处理
+会话侧历史残留的主要挂点，直调路径则保留其明确的兼容边界。
 
-可能带档位打过来的真实来源（升级前用过自动路由并显式选过档位的历史会话）：档位被
-持久化在 `model/selection` 或 request header 的 `config.reasoningEffort` 上，恢复时由
-`agent.ts` 还原。这条路径**经过 `agent/request` 瀑布流**，故兜底挂在那里（见下）。
+可能带档位打过来的真实来源包括当前会话仍合法的 caller 选择，以及升级前用过自动路由并显式
+选过档位的历史会话：档位可能持久化在 `model/selection` 或 request header 的
+`config.reasoningEffort` 上，恢复时由 `agent.ts` 还原。这条路径**经过 `agent/request` 瀑布流**，
+故守卫在该处判断当前聚合能力，合法值保留、失配值剥除（见下）。
 
-### 兜底：`agent/request` 上剥掉档位（宽容处理）
+### 兜底：`agent/request` 上按当前能力守卫档位（宽容处理）
 
-命中 `provider === AUTO_ROUTE_PROVIDER_ID && reasoningEffort !== undefined` 时
-`logger.warn` 一次并**剥掉该键**再放行，让这一轮照常按条目档位转发，而不是整轮报错。
+`installAutoRouteEffortGuard` 在 `agent/request` 上、宿主校验之前运行。命中
+`provider === AUTO_ROUTE_PROVIDER_ID` 且请求带 `reasoningEffort` 时，它重新解析当前聚合模型的
+能力：当前 `reasoning.efforts` 中仍合法的档位**原样保留**；能力缺失、为空或成功解析后明确失配时才
+`logger.warn` 一次并**删除该键**，让这一轮按条目配置及目标默认档位继续，而不是整轮报错。
+如果 `resolveModelInfo` 本身失败，能力处于未知状态，守卫只告警并**保留用户档位**，不把未知
+误判成失配。告警按 `provider/model` 去重。非自动路由请求和没有 `reasoningEffort` 的请求原样通过。
 
 为什么挂在 `agent/request` 而不是适配器：该瀑布流在 `prepareRequest` 里**早于
 `prepareCall`**（`agent-loop/agent.ts:531` 派发 vs `:542` 校验），是唯一能改变
@@ -327,14 +337,16 @@ provider 侧签名（Anthropic 的 `thinkingSignature` / DeepSeek Messages 的
 
 ⚠️ **覆盖面边界**：它只覆盖 agent 会话路径。`llm.resolveCallConfig` 的两条直调路径
 （面板 `session.selectModel`、子代理 `preflightChildLlmRoute`）是直接方法调用、无事件可挂，
-仍会以 `UNSUPPORTED_REASONING_EFFORT` 报错（面板侧表现为 `session/model-unavailable`）。
-这是刻意接受的：那两条是**显式选了档位**的动作，报错比静默丢弃用户的选择更诚实。
+仍由宿主按当前聚合声明校验：合法档位可以继续，失配或聚合模型没有有效 `reasoning` 声明时
+仍会以 `UNSUPPORTED_REASONING_EFFORT` 报错（面板侧可能表现为 `session/model-unavailable`）。
+这是刻意保留的直调边界；文档不据此声称宿主弹窗一定显示档位，也不提供宿主选择反向写回
+自动路由条目的能力。
 
 **还有一条同类的无兜底路径**：其他插件对 `ctx.llm.stream()` 的直调（如
-`session-title-llm`、`compaction-basic` 的摘要调用）同样绕开 `agent/request`，若它们
-带上档位打到聚合模型也会报错。它们目前都不带档位（各自用自己的配置），故不构成实际
-故障面；这里记下来是因为**新增一个带档位的直调方**就会踩到它，而入口剥键并不存在、
-也救不了（上表已证）。
+`session-title-llm`、`compaction-basic` 的摘要调用）同样绕开 `agent/request`。若它们带上
+档位打到聚合模型，仍由宿主按当前动态声明校验；能力不支持时会在适配器前失败。它们目前
+都不带自动路由档位（各自使用自己的配置），故不构成实际故障面；新增带档位的直调方时，
+不能期待本守卫替它改写请求。
 
 ### 技术取舍：为什么是 `agent/request`，不是 `llm/stream`
 
@@ -395,29 +407,33 @@ provider 侧签名（Anthropic 的 `thinkingSignature` / DeepSeek Messages 的
 
 ## 9. 测试与验证
 
-`tests/unit/auto-route-adapter.spec.ts`（**81 例**；其中伪装接线那几例随运输层落地新增，
+`tests/unit/auto-route-adapter.spec.ts`（**88 例**；其中伪装接线那几例随运输层落地新增，
 另有独立套件 `tests/unit/masquerade-transport.spec.ts` 30 例 +
 `tests/unit/masquerade-transport-wiring.spec.ts` 15 例，
 详见 `docs/agents/client-masquerade-design.md` §10）。**mock 的边界**：`ctx.llm` 用真实
 `LlmRuntime` ＋ 一个记录型目标适配器 —— 只有这样才能钉住「重入 `ctx.llm.stream()` 真的
 会重新走适配器选择与能力解析」；用替身 mock 掉 `ctx.llm.stream` 等于把被测的那一层也换掉。
-同理聚合模型「不声明档位」由真实运行时的 `resolveCallConfig` 校验（无声明即不物化），
-兜底则走真实的 `ctx.waterfall('agent/request')` 链路（不是直接调处理函数），并照
-`agent.ts` 的真实序列（瀑布流 → `prepareCall` → `preparedCall.stream`）断言整轮存活。
-内层失败**以 finish chunk 注入**（不是 throw），照 throw 写会测到一条线上不存在的路径。
+同理聚合模型的 `reasoning` 能力由真实运行时的 `resolveCallConfig` 校验：当前队首目标有非空
+`efforts` 时动态声明，目标没有有效档位表时省略；无声明且请求不带档位时不物化，有声明时
+按宿主规则处理合法默认值。兜底则走真实的 `ctx.waterfall('agent/request')` 链路（不是直接调
+处理函数），并照 `agent.ts` 的真实序列（瀑布流 → `prepareCall` → `preparedCall.stream`）
+断言整轮存活。内层失败**以 finish chunk 注入**（不是 throw），照 throw 写会测到一条线上
+不存在的路径。
 
-覆盖面：转发改写（条目 effort 优先 / 缺省不写该键）、消息 `source.provider` 重写
-（仅 assistant+model、其余原样引用、冻结请求不崩）、首 chunk 前失败静默降级、已透传后
-失败透传 + demote、`usage`/`block-start` 也算已透传、aborted 不降级、满一圈中文错只出现
-一次、无终止 chunk 的两种处置、跨请求持续降级、配置变更重建归位、listModels 门控、
-resolveModel 能力合并（含「**不声明** reasoning」的三条反向断言）、会话侧残留档位兜底
-（剥键 + warn 去重 + 两条对偶面 + 不改冻结入参 + 注销真的生效 + **整轮存活** +
-**入口不剥键的反面判据** + **剥键形态的对照面**）、注册生命周期
+覆盖面：转发改写（合法条目 effort 优先；失配条目不注入非法值，caller 仅在目标能力中合法时
+保留，否则让目标默认物化；预检失败保留旧 entry 转发）、消息 `source.provider` 重写（仅
+assistant+model、其余原样引用、冻结请求不崩）、首 chunk 前失败静默降级、已透传后失败透传
++ demote、`usage`/`block-start` 也算已透传、aborted 不降级、满一圈中文错只出现一次、无终止
+chunk 的两种处置、跨请求持续降级、配置变更重建归位、listModels 门控、resolveModel 能力合并
+（当前队首非空 `efforts` 的动态声明、entry/defaultEffort 合法性回退、目标变化后重新解析、
+不聚合备用候选）、会话侧档位兜底（合法聚合档位保留；能力缺失/空/失配/解析失败时剥键、
+warn 按 provider/model 去重、非目标与无档位原样、**整轮存活**、直调绕过边界）、注册生命周期
 （facts 不变不 replace / 开关切换 / 休眠真的摘掉路由）、门控（含「只影响 DSH 目录路径」
 的对偶断言）、重试策略。
 
 **变异检验**（改动会被测试抓住，不是「写了测试」就算）：去掉消息重写 → 2 红；
 `emitted` 退化为「已出字」→ 1 红；aborted 也 demote → 2 红；`listModels` 不套开关 → 1 红；
-`applyConfig` 幂等门失效 → 1 红；把目标的 `reasoning` 重新合并进聚合模型 → **4 红**；
-兜底改成「只 warn 不剥键」→ **3 红**；在 `stream()` 入口加剥键 → **2 红**（转发语义 +
-反面判据）；降级改用 `break` + 标志位（标志位写漏）→ 8 红。
+`applyConfig` 幂等门失效 → 1 红；把 reasoning 改为永远省略、固定不随当前队首变化或错误聚合
+备用候选 → 能力合并相关用例变红；兜底改成无条件删除合法档位或只 warn 不剥失配值 → 守卫相关
+用例变红；在 `stream()` 入口统一剥键 → 转发语义与直接调用边界用例变红；降级改用 `break` +
+标志位（标志位写漏）→ 8 红。
