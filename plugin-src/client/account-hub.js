@@ -3715,7 +3715,8 @@ function versionLogOf(update) {
  * - `latest`：当前版本号（stable 为 release tag，beta 为 tag+短 sha；未安装灰字）
  * - `available`：黄色「有更新 <版本>」—— 警示色与常态明确区分（用户拍板）
  * - `applying`：过程信息「更新中…」（更新过程就显示在这个文本位上）
- * - `applied`：绿色「已更新到 <版本>，建议重启」
+ * - `applied`：绿色「已更新到 <版本>，重启后生效」—— 服务端模块半边仍是
+ *   旧代码（apply 响应 `restartRequired: true`），重启前新功能并不在跑。
  * - `failed`：红色「更新失败：<服务端原文>」（原文一字不改，改写会洗掉线索）
  *
  * 点击展开对应日志：available/applied 展示**新版本** changelog，latest 展示
@@ -3731,7 +3732,7 @@ function UpdateStatusText({ update, onToggle }) {
     text = update.progressDetail || '更新中…';
     tone = 'muted';
   } else if (update.phase === 'applied') {
-    text = `已更新到 ${update.currentVersion || update.latestVersion}，建议重启`;
+    text = `已更新到 ${update.currentVersion || update.latestVersion}，重启后生效`;
     tone = 'ok';
   } else if (update.phase === 'failed') {
     text = `更新失败：${update.error}`;
@@ -3924,7 +3925,51 @@ export function AccountHubPage({ rpcCall }) {
    * 都不丢相位，也不再需要「卸载后别 setState」的守卫（store 没有那个约束）。
    */
   React.useEffect(() => {
-    if (updateStore.get().phase === 'idle') void checkUpdate();
+    // 页面在 apply 途中被刷新：store 是内存单例，刷新即丢，但相位字段在
+    // localStorage 之外只存在于内存 —— 挂载时读到的 applying 说明上次 apply
+    // 的结论未收口（正常路径 applyUpdate 的 finally 一定会写终态）。此刻用
+    // 服务端 status 的最近一笔结果快照（task 契约：apply 结束后 result 常驻）
+    // 直接收口，不发起会覆盖相位的新检查；服务端也没有记录（如宿主重启过）
+    // 则视为中断，回落 failed 并说明原因，绝不停在 applying 假装还在装。
+    const boot = updateStore.get().phase;
+    if (boot === 'applying') {
+      void (async () => {
+        try {
+          const status = await rpcCall('update.status', {});
+          // 服务端相位仍在推进（removing/installing/verifying）⇒ apply 还真在跑：
+          // 这不是「刷新丢结论」而是「刷新不丢进度」，保持 applying 展示进度明细，
+          // 由在途的 applyUpdate 走正常 finally 收口，恢复逻辑到此为止。
+          const live = status?.phase;
+          if (live === 'removing' || live === 'installing' || live === 'verifying' || live === 'applying') return;
+          const outcome = status?.result;
+          if (outcome?.ok === true) {
+            updateStore.set(prev => ({
+              ...prev,
+              phase: 'applied',
+              progressDetail: '',
+              currentSha: outcome.currentSha || prev.currentSha,
+              currentVersion: prev.currentVersion || prev.latestVersion,
+            }));
+          } else {
+            updateStore.set(prev => ({
+              ...prev,
+              phase: 'failed',
+              progressDetail: '',
+              error: outcome?.error || '上次更新未完成（页面已刷新），请重新更新',
+            }));
+          }
+        } catch {
+          updateStore.set(prev => ({
+            ...prev,
+            phase: 'failed',
+            progressDetail: '',
+            error: '上次更新未完成（页面已刷新），请重新更新',
+          }));
+        }
+      })();
+      return;
+    }
+    if (boot === 'idle') void checkUpdate();
   }, []);
 
   return React.createElement('section', { className: 'dim-ah-page', 'aria-label': '账号中心' },

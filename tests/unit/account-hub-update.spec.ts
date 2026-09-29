@@ -887,13 +887,13 @@ describe('Account Hub 更新 RPC 逻辑', () => {
     })
 
     const initialStatus = await call('update.status', {})
-    expect(initialStatus).toEqual({ ok: true, value: { phase: 'idle', detail: '' } })
+    expect(initialStatus).toEqual({ ok: true, value: { phase: 'idle', detail: '', result: null } })
 
     const betaApply = await call('update.apply', { channel: 'beta' })
     expect(betaApply.ok).toBe(true)
     expect(betaApply.value).toMatchObject({ currentSha: LATEST_SHA })
     const finalStatus = await call('update.status', {})
-    expect(finalStatus).toEqual({ ok: true, value: { phase: 'applied', detail: '安装完成' } })
+    expect(finalStatus).toEqual({ ok: true, value: { phase: 'applied', detail: '安装完成', result: { ok: true, previousSha: CURRENT_SHA, currentSha: LATEST_SHA } } })
     expect(exec).toHaveBeenNthCalledWith(
       2,
       'pnpm',

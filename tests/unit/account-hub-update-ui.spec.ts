@@ -19,6 +19,9 @@
  * - 无更新时版本文本显示当前版本号（currentVersion）；
  * - **更新状态活在模块级 store**（v0.3.1 核心修复）：点「更新」后离开账号中心
  *   （组件卸载）再回来（重挂载），applying 进度不丢、已完成的终态不重查；
+ * - 页面刷新后的 applying 恢复分支无法由 `renderStable` 触达（单测里的模块级 store
+ *   不会因刷新丢失相位），故用源码切片锁住恢复结构；这是本仓库既有先例
+ *   （`qoder-hub-blank-screen.spec.ts:28`）。
  * - 点版本文本弹「更新日志」弹窗（Modal，不就地展开）；空日志弹「暂无日志」；
  * - 切换通道下拉为 Beta：立即按 beta 通道重新检查（update.check 带
  *   channel: 'beta'），且通道选择持久化（模块变量 + localStorage）；
@@ -588,7 +591,7 @@ describe('页面级「检查更新 / 一键更新」（版本文本三态 + 通�
       .toBe(false)
   })
 
-  it('点「更新」：按钮保持「更新」但禁用，成功后显示「已更新到 <版本>，建议重启」', async () => {
+  it('点「更新」：按钮保持「更新」但禁用，成功后显示「已更新到 <版本>，重启后生效」', async () => {
     const gate = deferred<{ previousSha: string; currentSha: string; currentVersion: string }>()
     const { rpcCall } = makeUpdateRpc({
       check: async () => ({
@@ -617,12 +620,12 @@ describe('页面级「检查更新 / 一键更新」（版本文本三态 + 通�
     expect(textsOf(versionTextOf(busyTree)!).join(''), '版本文本位应显示安装阶段明细')
       .toContain('正在安装新版本…')
 
-    // 放行：成功态 —— 版本文本位变绿「已更新到 <版本>，建议重启」。
+    // 放行：成功态 —— 版本文本位变绿「已更新到 <版本>，重启后生效」。
     gate.resolve({ previousSha: SHA_OLD, currentSha: SHA_NEW, currentVersion: LATEST_TAG })
     const doneTree = await renderStable(client.AccountHubPage, { rpcCall }, client.hooks)
     const doneText = textsOf(versionTextOf(doneTree)!).join('')
-    expect(doneText, '成功后没有显示「已更新到 <版本>，建议重启」')
-      .toContain(`已更新到 ${LATEST_TAG}，建议重启`)
+    expect(doneText, '成功后没有显示「已更新到 <版本>，重启后生效」')
+      .toContain(`已更新到 ${LATEST_TAG}，重启后生效`)
     expect(doneText, '更新完成后不应残留安装阶段明细').not.toContain('正在安装新版本…')
     expect(versionTextOf(doneTree)!.props['data-tone'], '成功态应是成功色').toBe('ok')
 
@@ -656,7 +659,7 @@ describe('页面级「检查更新 / 一键更新」（版本文本三态 + 通�
     ;(findButtonByLabel(tree, '更新')!.props.onClick as () => void)()
     const doneTree = await renderStable(client.AccountHubPage, { rpcCall }, client.hooks)
     expect(textsOf(versionTextOf(doneTree)!).join(''), 'apply 缺 currentVersion 应回退 latestVersion')
-      .toContain(`已更新到 ${LATEST_TAG}，建议重启`)
+      .toContain(`已更新到 ${LATEST_TAG}，重启后生效`)
     expect(textsOf(doneTree).join(''), '任何回退场景都不该出现「未知」').not.toContain('未知')
   })
 
@@ -790,7 +793,48 @@ describe('页面级「检查更新 / 一键更新」（版本文本三态 + 通�
     gate.resolve({ previousSha: SHA_OLD, currentSha: SHA_NEW, currentVersion: LATEST_TAG })
     const doneTree = await renderStable(client.AccountHubPage, { rpcCall }, client.hooks)
     expect(textsOf(versionTextOf(doneTree)!).join(''), '页面外完成安装后回来应看到成功终态')
-      .toContain(`已更新到 ${LATEST_TAG}，建议重启`)
+      .toContain(`已更新到 ${LATEST_TAG}，重启后生效`)
+  })
+
+  it('页面刷新后 applying 恢复分支：源码锁住服务端终态收口与在途放行', async () => {
+    // 真实刷新会丢失模块级 store 的 applying 相位；单测里的 store 单例不会丢，
+    // 因而 renderStable 无法自然触达这条挂载恢复分支。沿用
+    // `qoder-hub-blank-screen.spec.ts:28` 的既有先例，读取源码切片锁住结构，
+    // 防止恢复语义被删掉或改成会覆盖在途更新的分支。
+    const { rpcCall } = makeUpdateRpc({
+      check: async () => ({
+        hasUpdate: true,
+        currentSha: SHA_OLD,
+        latestSha: SHA_NEW,
+        latestTag: LATEST_TAG,
+        latestTitle: LATEST_TITLE,
+        latestVersion: LATEST_TAG,
+        currentVersion: CURRENT_VERSION,
+        changelog: CHANGELOG,
+      }),
+      status: async () => ({
+        phase: 'applied',
+        detail: '安装完成',
+        result: { ok: true, previousSha: SHA_OLD, currentSha: SHA_NEW },
+      }),
+    })
+    await expect(rpcCall('update.check', { channel: 'stable' }), '恢复场景检查响应应为有更新')
+      .resolves.toMatchObject({ hasUpdate: true, currentSha: SHA_OLD, latestSha: SHA_NEW })
+    await expect(rpcCall('update.status', {}), '恢复场景 status 响应应携带已完成 result')
+      .resolves.toMatchObject({
+        phase: 'applied',
+        detail: '安装完成',
+        result: { ok: true, previousSha: SHA_OLD, currentSha: SHA_NEW },
+      })
+
+    const source = readFileSync(resolve(here, '../../plugin-src/client/account-hub.js'), 'utf8')
+    expect(source, '挂载恢复必须判断 store 当前是否处于 applying').toContain("if (boot === 'applying') {")
+    expect(source, '恢复分支必须读取 update.status 的 result 快照').toContain('const outcome = status?.result;')
+    expect(source, 'result.ok 为 true 时必须存在 applied 收口分支').toContain('if (outcome?.ok === true) {')
+    expect(source, '服务端仍在 removing/installing/verifying/applying 时必须放行在途状态')
+      .toContain("if (live === 'removing' || live === 'installing' || live === 'verifying' || live === 'applying') return;")
+    expect(source, 'status 无记录或失败时必须保留页面刷新 fallback 文案')
+      .toContain("error: outcome?.error || '上次更新未完成（页面已刷新），请重新更新',")
   })
 
   it('空日志：弹「暂无日志」说明文案，不渲染日志正文', async () => {

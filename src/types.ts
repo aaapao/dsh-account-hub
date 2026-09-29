@@ -570,6 +570,17 @@ export interface RpcUpdateStatusResponse {
   phase: RpcUpdateStatusPhase
   detail: string
   error?: string
+  /**
+   * 最近一笔 apply 的结果快照（成功与失败都带）：`update.apply` 结束后
+   * 页面刷新 / 面板重挂载时，`update.status` 靠它把「已完成 / 已失败」
+   * 找回来，而不是永远回到 idle。无记录时省略。
+   */
+  result?: {
+    ok: boolean
+    previousSha: string
+    currentSha: string
+    error?: string
+  }
 }
 
 /** RPC: `update.apply` 响应。 */
@@ -577,6 +588,12 @@ export interface RpcUpdateApplyResponse {
   previousSha: string
   currentSha: string
   log: string
+  /**
+   * 更新完成后是否需要重启宿主：磁盘上的文件已替换，但**宿主进程内
+   * 已加载的服务端模块仍是旧代码**（Node 不会重新 import 已加载模块），
+   * 客户端 bundle 可以刷新加载新版，服务端必须重启才生效 —— 如实告知。
+   */
+  restartRequired: true
 }
 
 /**

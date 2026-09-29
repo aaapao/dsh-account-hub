@@ -141,6 +141,7 @@ import { AUTO_ROUTE_PROVIDER_ID, type AutoRouteDefinition } from './auto-route.j
 import {
   applyAccountHubUpdate,
   checkAccountHubUpdate,
+  lastAccountHubApplyResult,
   type AccountHubUpdateDeps,
 } from './account-hub-update.js'
 // ────────────────── 客户端伪装：运输层状态面 ──────────────────
@@ -2027,7 +2028,10 @@ function registerAccountHubEndpoints(options: AccountHubRpcOptions): void {
             targetSha,
           )
           accountHubApplyProgress = { phase: 'applied', detail: '安装完成' }
-          return { ok: true, value }
+          // 服务端模块半边仍是旧代码在跑（宿主不会自动重 import）：更新完成
+          // 必须重启才真正生效，把这个结论作为结构化字段带给客户端，而不是
+          // 只靠文案里一句「建议重启」。
+          return { ok: true, value: { ...value, restartRequired: true } }
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error)
           accountHubApplyProgress = { phase: 'failed', detail: '安装失败', error: message }
@@ -2036,7 +2040,13 @@ function registerAccountHubEndpoints(options: AccountHubRpcOptions): void {
       }
 
       case 'update.status':
-        return { ok: true, value: { ...accountHubApplyProgress } }
+        // 合并最近一笔 apply 的结果快照：apply 结束后（页面刷新 / 重挂载 /
+        // 轮询恰好错过 applied 瞬间）status 仍能带回「成功 / 失败 + 到哪个
+        // 版本」，客户端不会卡在 applying 也不会退回一片空白的 idle。
+        return {
+          ok: true,
+          value: { ...accountHubApplyProgress, result: lastAccountHubApplyResult() },
+        }
 
       case 'account.list': {
         const req = payload as RpcListAccountsRequest
