@@ -233,8 +233,8 @@ export class AutoRouteAdapter extends LlmAdapter {
    *   即整个分组消失）。关掉开关却还在下拉里留一组点了必然失败的模型，是最糟的
    *   形态。
    * - 能力（上下文窗口 / 思考档 / 模态）**不在这里声明**：`LlmModelInfo` 本来
-   *   就没有这些字段，它们由 {@link resolveModel} 按队首条目现算（其中思考档
-   *   **刻意不算** —— 见那里的说明）。这里刻意只给
+   *   就没有这些字段，它们由 {@link resolveModel} 按**当前队首条目**现算（含思考档），
+   *   随运行时降级队列的变化而变化。这里刻意只给
    *   `{provider, id, name}` —— 多塞字段会在宿主 `listModels` 那一层被静默丢掉
    *   （它只重建这四个字段），不如不写。
    */
@@ -249,30 +249,24 @@ export class AutoRouteAdapter extends LlmAdapter {
   }
 
   /**
-   * 精确模型能力 = **队首条目的部分目标能力** + 本自动模型的 id / 名称。
+   * 精确模型能力 = **当前队首条目的目标能力** + 本自动模型的 id / 名称。
    *
    * ## 为什么 `provider` / `id` 必须改写成 `auto-route` / `definition.id`
    *
    * 宿主 `normalizeModelInfo` 会硬校验 `resolved.provider === 路由名` 且
    * `resolved.id === 请求的模型名`，不符即抛 `INVALID_MODEL_INFO` —— 整轮对话起不来。
-   * 故目标能力**原样透传**（`reasoning` 除外，见下），身份三元组必须换成本路由的。
+   * 故目标能力按当前队首条目透传，身份三元组必须换成本路由的。
    *
-   * ## 唯一刻意的「不编造」：**不声明 reasoning**
+   * ## reasoning 的动态聚合
    *
-   * 聚合模型**一律不声明思考档位**，即使队首目标有档位表。档位的唯一归属是
-   * **条目**（`entry.effort`）：条目配了就由 {@link forwardOptions} 在转发时注入，
-   * 没配就落目标模型自己的默认档 —— 会话侧那条下拉整个不存在。
+   * `reasoning` 只来自当前队首条目解析出的目标 provider/model；目标没有有效的
+   * `efforts` 时不声明。`entry.effort` 仍是实际转发档位的唯一来源：命中目标
+   * `efforts` 时把它作为聚合模型的 `defaultEffort`，非法时回退目标自身的有效
+   * `defaultEffort`，两者都无效则省略默认值。这样能力声明随队首动态变化，同时
+   * {@link forwardOptions} 继续保持条目优先转发语义。
    *
-   * 会话侧下拉站不住的三个理由（用户定案）：
-   * 1. **条目配了档位时它会被无视**：转发以条目为准，下拉选了也不生效；
-   * 2. **没配时它只对队首有意义**：档位表来自队首目标，可队首会随降级漂移，
-   *    用户在 `p-a` 的档位表上选的档，转发给 `p-b` 时未必存在；
-   * 3. **档位失配会引发链式降级**：宿主在**到达本适配器之前**就按聚合模型声明的
-   *    efforts 校验（见 `resolveCallWithInfo`），选的档不在声明里就直接
-   *    `UNSUPPORTED_REASONING_EFFORT`，整轮对话起不来。
-   *
-   * 想给同一个 provider/model 用不同档位，就在面板里建**多个自动模型**（一个条目
-   * 一个档位）—— 这正是「条目是档位唯一归属」的落地形态。
+   * 这里不复制 provider 名单，也不把非法条目档位伪装成能力；当前队首若因降级
+   * 变化，下一次 `resolveModel` 会重新读取对应目标能力。
    */
   async resolveModel(provider: string, model: string, signal?: AbortSignal): Promise<LlmResolvedModelInfo> {
     const definition = this.definitionOf(model)
@@ -306,7 +300,7 @@ export class AutoRouteAdapter extends LlmAdapter {
         { cause: error },
       )
     }
-    return mergeResolvedModel(target, definition)
+    return mergeResolvedModel(target, definition, entry)
   }
 
   /**
@@ -424,13 +418,13 @@ export class AutoRouteAdapter extends LlmAdapter {
  * - `provider` / `model`：换成队首条目的目标。
  * - `reasoningEffort`：条目**配了**档位就用条目的（自动模型 = provider + model +
  *   effort 的打包语义）；**没配**就什么都不写 —— `...options` 已经带着调用方的值，
- *   写一个 `undefined` 会**覆盖掉**它。档位的唯一归属就是条目。
+ *   写一个 `undefined` 会**覆盖掉**它。条目仍是实际请求档位的优先来源。
  *
- *   注意在真实会话路径上「调用方的值」恒为 undefined：聚合模型不声明 reasoning
- *   （见 {@link AutoRouteAdapter.resolveModel}），DSH 没有档位下拉、宿主也无从物化。
- *   故这一支的实际效果就是「落目标模型自己的默认档」。保留透传形态而不是写死
- *   `entry.effort`，是为了让**直接调适配器**的场景（测试、未来的外部调用方）语义
- *   仍然是「条目优先、调用方兜底」，而不是静默丢弃调用方的显式选择。
+ *   真实 agent 会话路径由 {@link installAutoRouteEffortGuard} 先移除会话侧残留或
+ *   物化的聚合默认档位：有 `entry.effort` 时转发它，缺失时让目标 provider 自己
+ *   物化默认档。保留这里的透传形态而不是写死 `entry.effort`，是为了让**直接调
+ *   适配器**的场景（测试、未来的外部调用方）继续保持「条目优先、调用方兜底」语义，
+ *   不静默丢弃调用方的显式选择。
  * - `messages`：必须走 {@link rewriteMessagesForTarget}（replayState 归属检查，
  *   见那里的说明）。请求对象与其 `messages` 都是**深冻结**的，故这里 `map` 出新
  *   数组、浅拷贝出新对象，绝不原地改。
@@ -523,22 +517,59 @@ function masqueradePayloadOf(entry: AutoRouteEntry): MasqueradePayload | undefin
 /**
  * 把目标能力合并成「本自动模型」的能力声明。
  *
- * **只合并 `context` / `defaultMaxTokens` 等不随档位争议的能力；`reasoning` 一律
- * 不合并**（键都不留）—— 聚合模型在会话侧没有档位，档位唯一归属条目。设计原因见
- * `resolveModel` 的 JSDoc（三条：条目配了会被无视 / 只对队首有意义 / 失配链式降级）。
+ * `context` / `defaultMaxTokens` 等目标能力原样保留；`reasoning` 也只保留当前
+ * 队首目标声明的 `efforts`，不把其他 provider/model 的能力拼进来。目标没有有效
+ * 档位表时整块省略 reasoning，避免把空能力误报成可选能力。
+ *
+ * `entry.effort` 是实际转发档位的唯一来源：它命中目标 `efforts` 时作为聚合模型的
+ * `defaultEffort`；缺失或非法时回退目标 resolver 自己的有效 `defaultEffort`，再无
+ * 有效默认值就省略。构造全新的 reasoning 与返回对象，绝不修改 resolver 所有的
+ * target 或其嵌套的 efforts 数组。
  *
  * 独立成函数是为了让 `resolveModel` 只读一遍：合并规则集中在一处，加字段时不会漏改。
  */
 function mergeResolvedModel(
   target: LlmResolvedModelInfo,
   definition: AutoRouteDefinition,
+  entry: AutoRouteEntry,
 ): LlmResolvedModelInfo {
-  const { reasoning: _discardedReasoning, ...targetWithoutReasoning } = target
+  const { reasoning: targetReasoning, ...targetWithoutReasoning } = target
+  const reasoning = mergeReasoning(targetReasoning, entry.effort)
   return {
     ...targetWithoutReasoning,
+    ...reasoning === undefined ? {} : { reasoning },
     provider: AUTO_ROUTE_PROVIDER_ID,
     id: definition.id,
     name: definition.name,
+  }
+}
+
+/**
+ * 只把当前目标的 reasoning 能力映射到聚合模型，并按当前条目计算默认档位。
+ * 返回新对象，避免修改 `resolveModelInfo` 所有的目标能力对象。
+ */
+function mergeReasoning(
+  target: LlmResolvedModelInfo['reasoning'],
+  entryEffort: AutoRouteEntry['effort'],
+): LlmResolvedModelInfo['reasoning'] {
+  if (target === undefined) return undefined
+  const efforts = target.efforts
+  if (!Array.isArray(efforts) || efforts.length === 0) return undefined
+
+  const { defaultEffort: targetDefaultEffort, ...otherReasoning } = target
+  const entryDefaultEffort = entryEffort === undefined
+    ? undefined
+    : efforts.find((effort) => effort.id === entryEffort)?.id
+  const fallbackDefaultEffort = targetDefaultEffort !== undefined
+    && efforts.some((effort) => effort.id === targetDefaultEffort)
+    ? targetDefaultEffort
+    : undefined
+  const defaultEffort = entryDefaultEffort ?? fallbackDefaultEffort
+
+  return {
+    ...otherReasoning,
+    efforts: [...efforts],
+    ...defaultEffort === undefined ? {} : { defaultEffort },
   }
 }
 
