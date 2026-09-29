@@ -382,6 +382,17 @@ describe('Hub 面板 UI 调整包（源码级回归）', () => {
     expect(ruleOf('.dim-ah-layout')).toContain('overflow: hidden')
   })
 
+  it('滚动条占位恒定：四处滚动容器都声明 scrollbar-gutter: stable（防滚动条闪现挤布局）', () => {
+    // 滚动条出现/消失会引起内容宽度跳变（用户真机反馈的「滚动条突然出现让布局变化」）。
+    // scrollbar-gutter: stable 让占位恒定：rail 是可见滚动条容器，占位永远保留；
+    // panel 的滚动条被隐藏，gutter 在 Chromium 下解析为 0、天然稳定，写它是把
+    // 「不闪跳」语义固化成锁点，防止后人误删。
+    expect(ruleOf('.dim-ah-rail')).toContain('scrollbar-gutter: stable')
+    expect(ruleOf('.dim-ah-panel')).toContain('scrollbar-gutter: stable')
+    expect(ruleOf('.dim-ah-updateLog')).toContain('scrollbar-gutter: stable')
+    expect(ruleOf('.dim-ah-modalBody')).toContain('scrollbar-gutter: stable')
+  })
+
   it('② 供应商导航按钮恒等宽：左栏不被右栏内容挤压', () => {
     // 根因（真机实测）：`.dim-ah-layout` 去掉 overflow:hidden 后，`.dim-ah-panel`
     // 的 min-width:auto 解析为 min-content，右栏内容一宽就把 width:200px 且

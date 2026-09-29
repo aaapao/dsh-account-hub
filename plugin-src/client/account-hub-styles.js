@@ -64,8 +64,10 @@ const STYLES = `
 
 /* 左侧导航：align dsh-im .dim-rail
    flex:none 与上面那条 overflow:hidden 是同一件事的两道保险：左栏宽度
-   恒为 200px，不随右栏内容收缩（光有 width 挡不住 flex-shrink）。 */
-.dim-ah-rail { flex: none; width: 200px; border-right: 1px solid var(--dsw-alias-border-l2); padding: 8px; overflow-y: auto; display: grid; align-content: start; gap: 8px; }
+   恒为 200px，不随右栏内容收缩（光有 width 挡不住 flex-shrink）。
+   scrollbar-gutter: stable 让滚动条占位恒定：内容增多时滚动条出现/消失
+   不会引起本栏内容区宽度跳变（真机报障：内容多时滚动条突然出现挤布局）。 */
+.dim-ah-rail { flex: none; width: 200px; border-right: 1px solid var(--dsw-alias-border-l2); padding: 8px; overflow-y: auto; scrollbar-gutter: stable; display: grid; align-content: start; gap: 8px; }
 
 /* 每个 provider 按钮：align dsh-im .dim-channel
    box-sizing 与栅格都是**等宽的组成部分**：左栏 200px 固定后，按钮宽度还要
@@ -110,13 +112,15 @@ const STYLES = `
 .dim-ah-providerGroup { display: grid; align-content: start; gap: 8px; padding-left: 6px; }
 
 /* 右侧面板：自身滚动，但**不显示滚动条**。
+   scrollbar-gutter: stable 与隐藏并存：滚动条隐藏时占位恒为 0、天然稳定；
+   留这条是与其他三个滚动容器口径统一，将来若撤隐藏、占位也不会闪跳。
    滚动条只是被隐藏，滚动能力原样保留（滚轮 / 键盘 / 触控板照常）。
    两条路径都要写，且不是重复：scrollbar-width 是 Firefox 的口径，
    ::-webkit-scrollbar 是 Chromium / Electron（DSH 桌面端）的口径。
    ⚠️ 反过来也成立：Chromium 里一旦声明 scrollbar-width: none，本元素上的
    ::-webkit-scrollbar* 规则会被整体丢弃 —— 这里不要紧（我们要的就是隐藏），
    但**别**在这条规则上再加 hover 之类的伪元素定制。 */
-.dim-ah-panel { flex: 1; padding: 24px; overflow-y: auto; scrollbar-width: none; }
+.dim-ah-panel { flex: 1; padding: 24px; overflow-y: auto; scrollbar-gutter: stable; scrollbar-width: none; }
 .dim-ah-panel::-webkit-scrollbar { display: none; }
 .dim-ah-empty { display: flex; flex-direction: column; align-items: center; text-align: center; padding: 40px; color: var(--dsw-alias-label-tertiary); }
 .dim-ah-empty p { margin: 8px 0; font-size: var(--dsw-font-s-14-font-size); line-height: var(--dsw-font-s-14-line-height); }
@@ -235,8 +239,9 @@ const STYLES = `
 /* 有更新态的白底黑字「更新」按钮（用户拍板，替换原 ⇩ 图标按钮形态）。 */
 .dim-ah-updateBtn { min-width: max-content; }
 /* 更新日志：等宽 + 限高滚动。服务端给的是 pnpm 安装输出汇总，可能上百行，
-   不设上限会把下面的两栏布局顶出视口（与 .dim-ah-modal 的 max-height 同一考虑）。 */
-.dim-ah-updateLog { max-height: 180px; margin: 6px 0 0; padding: 8px 10px; overflow: auto; border-radius: 8px; background: var(--dsw-alias-bg-layer-2); font-family: var(--ds-font-family-code); font-size: var(--dsw-font-xxxs-11-font-size); line-height: var(--dsw-font-xxxs-11-line-height); white-space: pre-wrap; word-break: break-all; }
+   不设上限会把下面的两栏布局顶出视口（与 .dim-ah-modal 的 max-height 同一考虑）。
+   scrollbar-gutter: stable：日志跨过限高时滚动条占位恒定，不挤压文本宽度。 */
+.dim-ah-updateLog { max-height: 180px; margin: 6px 0 0; padding: 8px 10px; overflow: auto; scrollbar-gutter: stable; border-radius: 8px; background: var(--dsw-alias-bg-layer-2); font-family: var(--ds-font-family-code); font-size: var(--dsw-font-xxxs-11-font-size); line-height: var(--dsw-font-xxxs-11-line-height); white-space: pre-wrap; word-break: break-all; }
 
 /* 弹窗被拦截时的手动登录链接。
    这里**不是**装饰性链接，而是唯一的登录入口，因此必须一眼可见、可点、
@@ -279,7 +284,7 @@ const STYLES = `
 /* 列表区独立滚动：头部固定，模型多时只滚中间。
    这条 class 是 ModelListPanel 自绘正文容器的类名（headless 下不再走 Modal 的
    contentClassName）—— 正文的左右内边距与滚动都靠它。 */
-.dim-ah-modalBody { flex: 1 1 auto; min-height: 0; padding: 0 24px; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
+.dim-ah-modalBody { flex: 1 1 auto; min-height: 0; padding: 0 24px; overflow-y: auto; scrollbar-gutter: stable; display: flex; flex-direction: column; gap: 4px; }
 .dim-ah-modalBody .dim-ah-empty { padding: 24px; }
 
 /* 每行一个模型：左侧名称 + id，右侧开关（多档 provider 再多一列窗口档位） */
