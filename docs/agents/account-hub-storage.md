@@ -258,8 +258,8 @@ Buddy 系改名曾将中国版 `buddy` 调整为 `buddy-cn`，国际版 `workbud
   → 取 `reasoning` → `{ efforts: id[], defaultEffort? }`（`defaultEffort` 缺席即不补键，
   编造默认档会让编辑器把「没配」显示成「配了某一档」）。**这是面板「条目档位下拉」的
   唯一数据源**，读的是**被转发的那个真实 provider/model**，与聚合模型的能力声明无关 ——
-  聚合模型刻意不声明思考档位（会话侧没有档位下拉，见
-  `docs/agents/auto-route-runtime.md` §7），故**本条不受影响**、也不需要跟着改。
+  调用方合法档位优先，聚合模型的 reasoning 声明（合法 entry.effort 作为默认回落档）服务于会话侧档位下拉（
+  `docs/agents/auto-route-runtime.md` §7），而**本条**读的是真实目标能力，故**不受影响**、也不需要跟着改。
   **尽力而为、永不报错**：
   无 `reasoning`（CodeArts 全系）、provider 不认该模型、适配器抛错 —— 三种都回 `{}`，
   那是**正常结果**（编辑器显示「该模型无档位可选」）而非「加载失败」；`provider` 传

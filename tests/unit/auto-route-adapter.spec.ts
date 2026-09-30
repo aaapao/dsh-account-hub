@@ -7,8 +7,8 @@
  * `auto-route.spec.ts` 守纯逻辑（配置判据 / 轮转引擎），`auto-route-rpc.spec.ts` 守
  * 配置面（落盘 / RPC）。本文件守的是**中间那一段**，也是三处最容易静默失效的地方：
  *
- * 1. **转发语义**：目标 provider / model / effort 怎么取（条目配了用条目的、没配就不写该键，
- *    落目标自己的默认档）、历史消息的 `source.provider` 怎么重写（不重写 = 思考模式工具轮
+ * 1. **转发语义**：目标 provider / model / effort 怎么取（预检可用时优先调用方合法档位，再回落合法条目档位；预检不可用时保留调用方带值、缺省则回落条目档位；皆无时不带该键并落目标默认档），
+ *    历史消息的 `source.provider` 怎么重写（不重写 = 思考模式工具轮
  *    400，见 `rewriteMessagesForTarget` 的说明）、冻结请求能不能改。
  * 2. **能力声明**：聚合模型按当前队首目标动态合并 reasoning 能力（只暴露非空
  *    `efforts`，并按条目 / 目标默认档回退）；队首变化后能力随之变化——见第 9 节。
@@ -273,15 +273,90 @@ describe('rewriteMessagesForTarget：只改 assistant + model source 的 provide
 // ──────────────────────────── 2. 转发改写（provider / model / effort）────────────────────────────
 
 describe('stream：转发改写', () => {
-  it('条目**配了** effort → 用条目的（自动模型 = provider + model + effort 打包语义）', async () => {
+  it('调用方合法档位优先于条目 effort；entry.effort 成为默认回落档', async () => {
     const cfg = () => config(true, [def('m1', '自动一号', [{ provider: 'p-a', model: 'a', effort: 'high' }])])
     const { adapter, target } = await harness({ config: cfg })
     target.queue('p-a', { kind: 'chunks', chunks: [{ type: 'finish', reason: { kind: 'stop' } }] })
 
     await drain(adapter, 'm1', { reasoningEffort: ReasoningEffortId('low') })
 
+    // 目标预检接受调用方 low 时优先转发；条目的 high 仅在调用方缺省或非法时回落使用。
     expect(target.seen.get('p-a')).toHaveLength(1)
-    expect(target.seen.get('p-a')![0]).toMatchObject({ provider: 'p-a', model: 'a', reasoningEffort: 'high' })
+    expect(target.seen.get('p-a')![0]).toMatchObject({ provider: 'p-a', model: 'a', reasoningEffort: 'low' })
+  })
+
+  it('预检成功 + caller 缺省 + 条目档位受支持 → 转发 entry.effort', async () => {
+    const cfg = () => config(true, [def('m1', '自动一号', [{ provider: 'p-a', model: 'a', effort: 'high' }])])
+    const { adapter, target } = await harness({ config: cfg })
+    target.queueResolve('p-a', 'a', {
+      provider: 'p-a',
+      id: 'a',
+      name: '目标 a',
+      ...TARGET_MODEL_INFO,
+      reasoning: {
+        efforts: [
+          { id: ReasoningEffortId('low'), name: 'Low' },
+          { id: ReasoningEffortId('high'), name: 'High' },
+          { id: ReasoningEffortId('max'), name: 'Max' },
+        ],
+        defaultEffort: ReasoningEffortId('low'),
+      },
+    })
+    target.queue('p-a', { kind: 'chunks', chunks: [{ type: 'finish', reason: { kind: 'stop' } }] })
+
+    await drain(adapter, 'm1')
+
+    expect(target.seen.get('p-a')![0].reasoningEffort).toBe('high')
+  })
+
+  it('预检成功 + caller 档位不受支持、条目档位受支持 → 回落 entry.effort', async () => {
+    const cfg = () => config(true, [def('m1', '自动一号', [{ provider: 'p-a', model: 'a', effort: 'high' }])])
+    const { adapter, target } = await harness({ config: cfg })
+    target.queueResolve('p-a', 'a', {
+      provider: 'p-a',
+      id: 'a',
+      name: '目标 a',
+      ...TARGET_MODEL_INFO,
+      reasoning: {
+        efforts: [
+          { id: ReasoningEffortId('low'), name: 'Low' },
+          { id: ReasoningEffortId('high'), name: 'High' },
+        ],
+        defaultEffort: ReasoningEffortId('low'),
+      },
+    })
+    target.queue('p-a', { kind: 'chunks', chunks: [{ type: 'finish', reason: { kind: 'stop' } }] })
+
+    await drain(adapter, 'm1', { reasoningEffort: ReasoningEffortId('max') })
+
+    expect(target.seen.get('p-a')![0].reasoningEffort).toBe('high')
+  })
+
+  it('预检成功 + caller 与条目档位均不受支持 → 转发 options 省略 reasoningEffort 键', async () => {
+    const cfg = () => config(true, [def('m1', '自动一号', [{ provider: 'p-a', model: 'a', effort: 'minimal' }])])
+    const { ctx, adapter, target } = await harness({ config: cfg })
+    target.queueResolve('p-a', 'a', {
+      provider: 'p-a',
+      id: 'a',
+      name: '目标 a',
+      ...TARGET_MODEL_INFO,
+      reasoning: {
+        efforts: [
+          { id: ReasoningEffortId('low'), name: 'Low' },
+          { id: ReasoningEffortId('high'), name: 'High' },
+        ],
+        defaultEffort: ReasoningEffortId('low'),
+      },
+    })
+    target.queue('p-a', { kind: 'chunks', chunks: [{ type: 'finish', reason: { kind: 'stop' } }] })
+    const streamSpy = vi.spyOn(ctx.llm, 'stream')
+
+    await drain(adapter, 'm1', { reasoningEffort: ReasoningEffortId('max') })
+
+    // 在真实 LlmRuntime 物化目标默认档之前，断言适配器交给 stream 的 options 省略了键。
+    const forwarded = streamSpy.mock.calls[0]![0]
+    expect('reasoningEffort' in forwarded).toBe(false)
+    expect(target.seen.get('p-a')![0].reasoningEffort).toBe('low')
   })
 
   it('条目没配 effort 且 caller 带合法档位 → 直调真实 stream 预检后在目标支持时转发', async () => {
@@ -1568,7 +1643,19 @@ describe('installAutoRouteEffortGuard：按当前能力清理会话档位', () =
     expect(target.seen.get('p-a')![0].reasoningEffort).toBe('high')
   })
 
-  it('stream 预检 resolveModelInfo reject → 保留 entry 档位并继续原转发', async () => {
+  it('stream 预检 resolveModelInfo reject + 调用方带档位 → 原样优先于 entry.effort', async () => {
+    const cfg = () => config(true, [def('m1', '自动一号', [{ provider: 'p-a', model: 'a', effort: 'max' }])])
+    const { adapter, target } = await harness({ config: cfg })
+    target.queueResolve('p-a', 'a', new Error('preflight failed'))
+    target.queue('p-a', { kind: 'chunks', chunks: [{ type: 'finish', reason: { kind: 'stop' } }] })
+
+    await drain(adapter, 'm1', { reasoningEffort: ReasoningEffortId('high') })
+
+    // 预检失败时不验证两方档位；调用方显式值原样优先于 entry.effort。
+    expect(target.seen.get('p-a')![0].reasoningEffort).toBe('high')
+  })
+
+  it('stream 预检 resolveModelInfo reject + 调用方缺省 → 回落 entry 档位并继续转发', async () => {
     const cfg = () => config(true, [def('m1', '自动一号', [{ provider: 'p-a', model: 'a', effort: 'high' }])])
     const { adapter, target } = await harness({ config: cfg })
     target.queueResolve('p-a', 'a', new Error('preflight failed'))
@@ -1576,7 +1663,7 @@ describe('installAutoRouteEffortGuard：按当前能力清理会话档位', () =
 
     await drain(adapter, 'm1')
 
-    // 预检失败不能改变既有降级拓扑，也不能静默剥掉 entry.effort；真实转发仍携带 high。
+    // 预检失败时调用方缺省，按新语义回落到 entry.effort；真实转发仍携带 high。
     expect(target.seen.get('p-a')![0].reasoningEffort).toBe('high')
   })
 })

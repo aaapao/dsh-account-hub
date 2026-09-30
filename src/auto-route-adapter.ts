@@ -260,10 +260,11 @@ export class AutoRouteAdapter extends LlmAdapter {
    * ## reasoning 的动态聚合
    *
    * `reasoning` 只来自当前队首条目解析出的目标 provider/model；目标没有有效的
-   * `efforts` 时不声明。`entry.effort` 仍是实际转发档位的唯一来源：命中目标
-   * `efforts` 时把它作为聚合模型的 `defaultEffort`，非法时回退目标自身的有效
-   * `defaultEffort`，两者都无效则省略默认值。这样能力声明随队首动态变化，同时
-   * {@link forwardOptions} 继续保持条目优先转发语义。
+   * `efforts` 时不声明。`entry.effort` 是聚合模型 `defaultEffort` 的来源，也是在调用方
+   * 未显式选择档位或其选择不被当前目标接受时的回落值：命中目标 `efforts` 时用作聚合
+   * 模型的默认档，非法时回退目标自身的有效 `defaultEffort`，两者都无效则省略默认值。
+   * 因此能力声明随队首动态变化；实际转发仍由 {@link forwardOptions} 按调用方优先、
+   * 条目回落的语义处理。
    *
    * 这里不复制 provider 名单，也不把非法条目档位伪装成能力；当前队首若因降级
    * 变化，下一次 `resolveModel` 会重新读取对应目标能力。
@@ -329,9 +330,9 @@ export class AutoRouteAdapter extends LlmAdapter {
       // 队首为 null = 该定义没有任何候选（未经 sanitize 的手工定义才会出现）。
       if (entry === null) break
       // 这是能力预检，不是一次额外的路由解析：entry.effort 或调用方档位任一存在时，
-      // 都要按这一轮的当前队首目标校验。预检失败时必须保留 entry.effort / 调用方档位，
-      // 让真实的目标 `ctx.llm.stream()` 继续产生原有的失败 chunk，降级拓扑不变。
-      // 只有预检成功，`forwardOptions` 才会剥掉失配值，并只保留目标已验证的档位。
+      // 都要按这一轮的当前队首目标校验。预检失败时保留调用方显式档位（缺省时才回落条目档位），
+      // 让真实目标 `ctx.llm.stream()` 继续产生原有的失败 chunk，降级拓扑不变。预检成功后，
+      // `forwardOptions` 只转发当前目标支持的调用方档位或条目回落档位，否则不带该键。
       let targetCapability: TargetCapabilityProbe | undefined
       if (entry.effort !== undefined || options.reasoningEffort !== undefined) {
         try {
@@ -432,11 +433,12 @@ export class AutoRouteAdapter extends LlmAdapter {
  * ## 逐字段语义
  *
  * - `provider` / `model`：换成队首条目的目标。
- * - `reasoningEffort`：条目**配了**档位时，真实自动路由请求会先用当前目标的
- *   `resolveModelInfo` 校验它；合法才注入条目档位。若条目档位已不在目标当前能力里，
- *   不注入该条目值，并在目标能力允许时保留调用方已经带来的合法值，否则让目标 provider
- *   自己物化默认档。能力预检只存在于异步的真实请求路径；没有预检能力的**直接调适配器**
- *   仍保持既有「条目有值优先、条目缺省时保留调用方值」语义。
+ * - `reasoningEffort`：目标能力预检成功时，先转发目标支持的调用方显式档位；调用方缺省
+ *   或其档位不被当前目标接受时，回落到目标支持的条目档位；两者都不受支持时不带该键，
+ *   由目标 provider 物化自身默认。目标能力预检不可用时，调用方显式档位原样优先转发，
+ *   调用方缺省时才转发条目档位，二者皆缺省则不带该键。真实请求路径会在有任一档位时
+ *   先尝试预检；预检不可用时不验证调用方或条目档位，潜在非法值交由目标宿主校验并走既有
+ *   错误 / 降级处置。直接调用适配器没有预检时遵循同一分支，保持「调用方优先、条目回落」语义。
  * - `messages`：必须走 {@link rewriteMessagesForTarget}（replayState 归属检查，
  *   见那里的说明）。请求对象与其 `messages` 都是**深冻结**的，故这里 `map` 出新
  *   数组、浅拷贝出新对象，绝不原地改。
@@ -478,38 +480,24 @@ function forwardOptions(
   entry: AutoRouteEntry,
   target?: TargetCapabilityProbe,
 ): GenerateOptions {
-  // `target` 缺省 = 没有能力预检：直接调适配器时保持「entry 有值优先、缺省时保留
-  // 调用方值」的旧语义；真实请求的预检失败则同样保留 entry.effort / 调用方值，让目标
-  // 解析 / stream 继续产生原有错误并由外层降级。只有预检成功才检查 entry 与调用方档位：
-  // entry 合法覆盖调用方；entry 失配或缺省时，仅保留目标能力验证过的调用方值。
+  // 有能力预检时只转发当前目标接受的档位：调用方显式选择优先，条目档位作为回落。
+  // 预检不可用（包括直调适配器）时无法验证任何一方，调用方显式选择优先原样转发；
+  // 调用方缺省才回落到条目值，二者皆缺省则不带档位键。
   const { reasoningEffort: callerEffort, ...optionsWithoutEffort } = options
-  let base = options
   let effort: ReasoningEffortId | undefined
-  if (entry.effort !== undefined) {
-    if (target === undefined || target.status === 'failed') {
-      // 预检失败不改变既有转发 / 降级拓扑，仍按旧语义注入 entry.effort。
-      effort = ReasoningEffortId(entry.effort)
-    } else if (reasoningEffortSupported(target.info, entry.effort)) {
-      // 当前目标接受条目档位：条目值优先，覆盖调用方值。
-      effort = ReasoningEffortId(entry.effort)
-    } else {
-      // 当前目标不接受条目档位：不夹带非法 entry；调用方值只有经同一目标能力
-      // 验证后才可通过，否则连同 entry 一起省略，让目标自己物化默认。
-      base = optionsWithoutEffort
-      if (callerEffort !== undefined && reasoningEffortSupported(target.info, callerEffort)) {
-        effort = callerEffort
-      }
-    }
-  } else if (target?.status === 'resolved') {
-    // entry 没配档位但真实请求完成了能力预检：同样不能把未经当前目标验证的 caller
-    // 值送给队首。先摘掉原值，再只恢复目标明确支持的 caller 档位；无效值由目标默认。
-    base = optionsWithoutEffort
+  if (target !== undefined && target.status === 'resolved') {
     if (callerEffort !== undefined && reasoningEffortSupported(target.info, callerEffort)) {
       effort = callerEffort
+    } else if (entry.effort !== undefined && reasoningEffortSupported(target.info, entry.effort)) {
+      effort = ReasoningEffortId(entry.effort)
     }
+  } else if (callerEffort !== undefined) {
+    effort = callerEffort
+  } else if (entry.effort !== undefined) {
+    effort = ReasoningEffortId(entry.effort)
   }
   return {
-    ...base,
+    ...optionsWithoutEffort,
     provider: entry.provider,
     model: entry.model,
     messages: rewriteMessagesForTarget(options.messages, entry.provider),
@@ -577,10 +565,10 @@ function masqueradePayloadOf(entry: AutoRouteEntry): MasqueradePayload | undefin
  * 队首目标声明的 `efforts`，不把其他 provider/model 的能力拼进来。目标没有有效
  * 档位表时整块省略 reasoning，避免把空能力误报成可选能力。
  *
- * `entry.effort` 是实际转发档位的唯一来源：它命中目标 `efforts` 时作为聚合模型的
- * `defaultEffort`；缺失或非法时回退目标 resolver 自己的有效 `defaultEffort`，再无
- * 有效默认值就省略。构造全新的 reasoning 与返回对象，绝不修改 resolver 所有的
- * target 或其嵌套的 efforts 数组。
+ * `entry.effort` 是聚合模型 `defaultEffort` 的来源，也是调用方未显式选择或其档位不被
+ * 当前目标接受时的回落值：它命中目标 `efforts` 时作为聚合模型默认档；缺失或非法时
+ * 回退目标 resolver 自己的有效 `defaultEffort`，再无有效默认值就省略。构造全新的 reasoning
+ * 与返回对象，绝不修改 resolver 所有的 target 或其嵌套的 efforts 数组。
  *
  * 独立成函数是为了让 `resolveModel` 只读一遍：合并规则集中在一处，加字段时不会漏改。
  */
@@ -820,7 +808,7 @@ export function installAutoRouteEffortGuard(ctx: Context): () => void {
       // 能力解析失败只能说明「无法判断」，不能把未知状态当成明确失配而删除用户选择。
       warnOnce(
         `无法确认会话侧思考档位 "${String(effort)}" 是否受当前队首支持，暂时保留`
-        + '（请检查当前队首目标的 reasoning 能力；需要固定档位时请在自动路由条目配置）',
+        + '（请检查当前队首目标的 reasoning 能力；需要调整默认档位时请在自动路由条目配置）',
       )
       return { ...resolved }
     }
@@ -828,7 +816,7 @@ export function installAutoRouteEffortGuard(ctx: Context): () => void {
 
     warnOnce(
       `收到当前能力不支持的会话侧思考档位 "${String(effort)}"，已忽略`
-      + '（请检查当前队首目标的 reasoning 能力；需要固定档位时请在自动路由条目配置）',
+      + '（请检查当前队首目标的 reasoning 能力；需要调整默认档位时请在自动路由条目配置）',
     )
     // 只有解析成功且明确失配时才剥键。删除而不是置 undefined 是语义偏好，不是正确性要求：
     // 宿主各处判据都是 `=== void 0`，两种形态在本链路上等效；删除更准确表达本轮不带档位。

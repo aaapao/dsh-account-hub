@@ -2,7 +2,7 @@
 
 ## 目标与计划依据
 
-**目标**：自动模型的能力元数据随当前队首候选变化，暴露该候选目标 provider/model 的 reasoning 支持列表与有效 defaultEffort；`entry.effort` 继续作为请求使用的候选档位和唯一编辑入口。重定义现有 agent/request guard 的历史残留清理，避免把当前聚合 reasoning 下仍有效的值误删。客户端伪装继续限于当前候选；关闭时清掉该候选实际伪装字段，并保证后续无载荷请求不写伪装头。
+**目标**：自动模型的能力元数据随当前队首候选变化，暴露该候选目标 provider/model 的 reasoning 支持列表与有效 defaultEffort；`entry.effort` 继续作为请求的默认回落档位和唯一编辑入口。重定义现有 agent/request guard 的历史残留清理，避免把当前聚合 reasoning 下仍有效的值误删。客户端伪装继续限于当前候选；关闭时清掉该候选实际伪装字段，并保证后续无载荷请求不写伪装头。
 
 **批准来源/范围锁定**：以用户已批准且已收敛的功能边界为规范；所有者与测试范围限于本计划所列文件。宿主 checkout 当前不可用，因此不把任何宿主私有实现或未公开事件写成事实。
 
@@ -12,7 +12,7 @@
 
 ## 目标 / 非目标
 
-- **目标**：对当前队首候选解析其目标 provider/model 的 `resolveModelInfo().reasoning` 并暴露支持列表，defaultEffort 采用该候选有效的 `entry.effort`，否则遵循 resolver 提供的 defaultEffort；实际请求仍以当前候选 `entry.effort` 为准。无 reasoning 能力时不推测、伪造或跨 provider 继承能力。
+- **目标**：对当前队首候选解析其目标 provider/model 的 `resolveModelInfo().reasoning` 并暴露支持列表，defaultEffort 采用该候选有效的 `entry.effort`，否则遵循 resolver 提供的 defaultEffort；实际请求在目标能力可解析时优先采用调用方合法档位，缺省或失配时回落当前候选 `entry.effort`；能力不可解析时调用方带值原样转发、缺省回落该档（2026-09-30 混合优先级修订）。无 reasoning 能力时不推测、伪造或跨 provider 继承能力。
 - **目标**：保留现有候选编辑器作为修改 `entry.effort` 的唯一入口；候选变化后重新基于新队首生成自动模型能力元数据。
 - **目标**：只在可以识别为旧 guard 历史残留且不再是当前聚合语义有效值时清理；无法安全区分时不做宽泛清除。
 - **目标**：关闭伪装只清当前候选实际字段，不扩至 provider 全局；无载荷请求不得写入伪装头。
@@ -30,14 +30,14 @@
 
 ## Ripple Signal
 
-- **规范所有者**：目标 provider/model resolver 的 `resolveModelInfo().reasoning` 是能力支持列表和 resolver defaultEffort 的唯一来源；账号池当前队首 `entry.effort` 是所选候选档位的事实来源；不在自动模型再造一份能力或持久化状态。
+- **规范所有者**：目标 provider/model resolver 的 `resolveModelInfo().reasoning` 是能力支持列表和 resolver defaultEffort 的唯一来源；账号池当前队首 `entry.effort` 是候选默认回落档位的事实来源（请求档位调用方合法优先）；不在自动模型再造一份能力或持久化状态。
 - **受影响消费者**：自动模型公开模型元数据的宿主消费方、现有候选编辑器、agent/request guard、伪装 transport/RPC。队首切换会影响公开 reasoning 列表/defaultEffort，guard 对历史值的清理判据也随聚合语义变化。
 - **契约/兼容风险**：仅通过已有公开模型信息契约暴露字段；没有可用的宿主弹窗变更事件，不增加反向回写或私有 API 依赖。缺少 resolver 能力时不添加全局默认或额外 fallback。关闭操作限定单个当前候选字段；外部旧补丁文件保留。
 - **停止条件**：若不能从现有状态/guard 逻辑安全区分“陈旧残留”和“有效值”，先停止清理范围并回到需求/设计，不得无条件删除；若候选级伪装实际字段无法定位，不扩展到全局清除。
 
 ## 兼容与退休边界
 
-- 保持账号池现有候选顺序、字段形态及既有 `entry.effort` 编辑/请求语义；不迁移或删除用户数据，不创建 auto-model 持久字段。
+- 保持账号池现有候选顺序、字段形态及既有 `entry.effort` 编辑语义与默认回落定位；不迁移或删除用户数据，不创建 auto-model 持久字段。
 - 将旧 guard 的“无条件清理”责任退休为窄条件判定；保留其对确证陈旧历史残留的止损能力，当前聚合语义有效的值必须保留。代码层仅退休已失效的清理责任，不删除有合法用途的 guard carrier。
 - 关闭伪装仅移除当前候选实际伪装字段，避免误伤其他账号/候选；transport 在无载荷时不得写伪装头。外部旧补丁文件明确不删除，且不以此为由再加一条本地 fallback。
 - **Anti-Entropy 决定**：内部旧的无条件删除行为按 `delete-first` 退休；合法的 guard 止损能力保留为窄责任。无外部依赖证据时不引入兼容双轨；外部旧补丁不属于本次内部代码删除范围。
@@ -49,7 +49,7 @@
 ## 按文件拆分的最小任务
 
 1. `src/auto-route-adapter.ts`：在现有自动模型元数据路径按当前队首解析目标 provider/model 的 `resolveModelInfo().reasoning`；仅输出其受支持列表，defaultEffort 采用有效 `entry.effort`，否则遵循 resolver 的 defaultEffort；不引入持久字段或推测能力。
-2. `src/auto-route-adapter.ts`（复用 `src/auto-route.ts` 的候选路由逻辑）：保证每次实际候选路由仍以该候选 `entry.effort` 为实际档位；将既有 agent/request guard 的历史残留判定改为聚合语义下的窄条件。有效值不得清除；无法识别陈旧状态时保留并停止扩大清理。
+2. `src/auto-route-adapter.ts`（复用 `src/auto-route.ts` 的候选路由逻辑）：保证每次实际候选路由在目标能力可解析时优先采用调用方合法档位、缺省或失配时回落该候选 `entry.effort`，能力不可解析时调用方带值原样转发、缺省回落该档；将既有 agent/request guard 的历史残留判定改为聚合语义下的窄条件。有效值不得清除；无法识别陈旧状态时保留并停止扩大清理。
 3. `src/index.ts`：只调整既有注册/接线，使公开模型信息请求能够使用 adapter 对当前队首的派生结果；不调用宿主私有 API、不接入不存在的弹窗变更事件。
 4. `src/account-hub-rpc.ts`：沿用现有 RPC 边界提供/更新当前候选数据；仅在当前 RPC 缺少完成候选级关闭或编辑所需的现有字段操作时作最小修改，不加模型级字段或全局清理。
 5. `src/account-pool.ts`：保持队首与候选实际 `entry.effort`/伪装字段作为唯一持久事实来源；如现有池操作无法精确清当前候选实际字段，只补窄范围操作，不改 schema/迁移。
@@ -68,7 +68,7 @@
    `pnpm exec vitest run tests/unit/auto-route-adapter.spec.ts tests/unit/auto-route-panel.spec.ts tests/unit/auto-route-masquerade.spec.ts tests/unit/masquerade-transport.spec.ts`
 2. 宿主侧静态检查：`pnpm typecheck`。
 3. 客户端构建及其既有产物求值冒烟：`pnpm build:client`。
-4. **验收**：以上命令通过；自动模型在队首变化后只暴露新候选 resolver 能力，defaultEffort 与该候选可用 `entry.effort` 一致且请求仍用候选实际值；不产生新 auto-model 持久状态；guard 不误删有效值；关闭只清当前候选实际伪装字段，后续无载荷请求不带伪装头；未改宿主私有接口、全局伪装路径或外部补丁文件。
+4. **验收**：以上命令通过；自动模型在队首变化后只暴露新候选 resolver 能力，defaultEffort 与该候选可用 `entry.effort` 一致且请求档位按混合优先级选取（调用方合法优先、缺省回落候选值）；不产生新 auto-model 持久状态；guard 不误删有效值；关闭只清当前候选实际伪装字段，后续无载荷请求不带伪装头；未改宿主私有接口、全局伪装路径或外部补丁文件。
 5. 不运行全量测试/e2e/发布流程，因为不在已批准验证范围内；client build 是插件客户端语义构建闸，不替代宿主 GUI 验证。
 
 ## 未知风险

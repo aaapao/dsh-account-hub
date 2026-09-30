@@ -34,7 +34,7 @@ DSH 怎么看到这些自动模型、一次请求怎么被转发出去、失败�
 | 字段 | 取值 | 为什么 |
 |---|---|---|
 | `provider` / `model` | 队首条目的目标 | 自动模型就是一条有序候选列表 |
-| `reasoningEffort` | 真实 `stream()` 路径先预检当前目标能力：条目档位合法时覆盖 caller；条目失配时不注入非法值，caller 仅在目标能力中合法时保留，否则不写并让目标默认物化；预检失败则保留旧 `entry.effort` 转发 | `entry.effort` 仍是候选实际档位与面板唯一编辑入口；没有预检能力的直接适配器调用维持条目优先、条目缺省时保留 caller |
+| `reasoningEffort` | 真实 `stream()` 路径先预检当前目标能力：调用方档位被目标接受时优先转发调用方；调用方缺省或不被目标接受时，回落到目标接受的条目 `effort`；两者都没有可用值时不注入，由目标 provider 物化自身默认。预检不可用时，调用方带值则原样转发，否则回落条目 `effort` | `entry.effort` 是候选默认档位，也是面板唯一编辑入口；没有预检能力时，调用方值优先，调用方缺省才用条目值 |
 | `messages` | `rewriteMessagesForTarget(options.messages, entry.provider)` | 见 §3（不重写 = 思考模式工具轮 400） |
 
 **请求对象与其 `messages` 数组都是深冻结的**（宿主 `agent.ts`），故重写必须
@@ -267,15 +267,13 @@ provider 侧签名（Anthropic 的 `thinkingSignature` / DeepSeek Messages 的
 也不会把非法的 `entry.effort` 伪装成聚合模型能力。队首因降级变化后，下一次 `resolveModel()`
 会重新读取新目标，因此声明可以随当前队首动态变化。
 
-`entry.effort` 仍是候选的实际档位，也是面板中编辑该档位的唯一入口，但它不对应新增的
+`entry.effort` 是候选的默认回落档位，也是面板中编辑该档位的唯一入口；它不对应新增的
 自动模型持久 reasoning 字段，也没有弹窗反向写回机制：
 
-1. `entry.effort` 落在当前目标 `reasoning.efforts` 中时，作为聚合模型的 `defaultEffort`，并在
-   真实转发预检成功时优先覆盖 caller 的 `reasoningEffort`。
+1. `entry.effort` 落在当前目标 `reasoning.efforts` 中时，作为聚合模型的 `defaultEffort`，即调用方未选择时的默认档。真实转发预检成功时，目标接受的调用方档位优先；调用方缺省或目标不接受调用方档位时，才回落到该条目档位。
 2. 条目没有档位，或条目档位不在当前目标能力中时，不把非法值写进聚合声明；聚合声明只在
    目标仍有有效 `efforts` 时保留目标的档位列表。
-3. 条目档位非法或缺失时，只有目标自身仍落在 `efforts` 内的 `defaultEffort` 才作为默认值；
-   默认值缺失或失配则不声明 `defaultEffort`。因此不能据此推断宿主弹窗一定显示档位，
+3. 条目档位非法或缺失时，只有目标自身仍落在 `efforts` 内的 `defaultEffort` 才作为聚合模型的默认值；真实转发时若调用方没有目标接受的档位、条目也没有目标接受的档位，则不注入档位，由目标 provider 物化自身默认。目标默认值缺失或失配则不声明聚合 `defaultEffort`。因此不能据此推断宿主弹窗一定显示档位，
    也不能把宿主侧选择理解为会写回自动路由条目。
 
 `dsh-llm@0.1.2-rc.1` 实测（真实 `LlmRuntime`，非读文档推断）：
@@ -307,9 +305,9 @@ provider 侧签名（Anthropic 的 `thinkingSignature` / DeepSeek Messages 的
 接上）。故在聚合适配器 `stream()` 入口剥除档位不能修复真实会话路径。
 
 而且无条件入口剥键对直接调适配器的场景**还有害**：本仓的转发语义用例及未来外部调用方依赖
-`forwardOptions` 的无 probe 规则——条目档位优先，条目缺省时保留 caller 值。故不把无条件
+`forwardOptions` 的无 probe 规则——调用方带值优先，缺省回落条目档位。故不把无条件
 清理放进 `stream()`；真实 `stream()` 只在本次确实带有 entry/caller 档位时做目标能力预检，
-预检成功后按当前目标筛选，预检失败仍保留旧转发拓扑。`agent/request` 仍是宿主校验前处理
+预检成功后按当前目标筛选，预检失败时退回无 probe 规则（调用方带值原样优先），降级拓扑不变。`agent/request` 仍是宿主校验前处理
 会话侧历史残留的主要挂点，直调路径则保留其明确的兼容边界。
 
 可能带档位打过来的真实来源包括当前会话仍合法的 caller 选择，以及升级前用过自动路由并显式
@@ -420,8 +418,8 @@ provider 侧签名（Anthropic 的 `thinkingSignature` / DeepSeek Messages 的
 断言整轮存活。内层失败**以 finish chunk 注入**（不是 throw），照 throw 写会测到一条线上
 不存在的路径。
 
-覆盖面：转发改写（合法条目 effort 优先；失配条目不注入非法值，caller 仅在目标能力中合法时
-保留，否则让目标默认物化；预检失败保留旧 entry 转发）、消息 `source.provider` 重写（仅
+覆盖面：转发改写（调用方合法档位优先、条目 effort 为默认回落；失配条目不注入非法值，caller 仅在目标能力中合法时
+保留，否则让目标默认物化；预检失败时 caller 带值原样优先、缺省回落 entry）、消息 `source.provider` 重写（仅
 assistant+model、其余原样引用、冻结请求不崩）、首 chunk 前失败静默降级、已透传后失败透传
 + demote、`usage`/`block-start` 也算已透传、aborted 不降级、满一圈中文错只出现一次、无终止
 chunk 的两种处置、跨请求持续降级、配置变更重建归位、listModels 门控、resolveModel 能力合并
